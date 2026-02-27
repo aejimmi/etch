@@ -186,10 +186,10 @@ impl<T: Clone, B: Backend<T>> Store<T, B> {
         let _gate = self.write_gate.lock();
 
         // In grouped mode, fail-fast if flusher had an error.
-        if let Some(ref shared) = self.shared {
-            if let Some(err) = shared.last_error.lock().take() {
-                return Err(err);
-            }
+        if let Some(ref shared) = self.shared
+            && let Some(err) = shared.last_error.lock().take()
+        {
+            return Err(err);
         }
 
         if let Some(ref inc) = self.incremental {
@@ -326,10 +326,10 @@ impl<T: Transactable, B: Backend<T>> Store<T, B> {
         let _gate = self.write_gate.lock();
 
         // Fail-fast on grouped flusher error.
-        if let Some(ref shared) = self.shared {
-            if let Some(err) = shared.last_error.lock().take() {
-                return Err(err);
-            }
+        if let Some(ref shared) = self.shared
+            && let Some(err) = shared.last_error.lock().take()
+        {
+            return Err(err);
         }
 
         // Borrow committed state via read lock — no clone.
@@ -339,16 +339,16 @@ impl<T: Transactable, B: Backend<T>> Store<T, B> {
         let (ops, overlay) = T::finish_tx(tx);
         drop(state_guard); // release read lock before write lock
 
-        if !ops.is_empty() {
-            if let Some(ref inc) = self.incremental {
-                match &self.shared {
-                    None => {
-                        inc.save_ops(&ops)?;
-                        inc.sync()?;
-                    }
-                    Some(shared) => {
-                        shared.pending_ops.lock().push(ops);
-                    }
+        if !ops.is_empty()
+            && let Some(ref inc) = self.incremental
+        {
+            match &self.shared {
+                None => {
+                    inc.save_ops(&ops)?;
+                    inc.sync()?;
+                }
+                Some(shared) => {
+                    shared.pending_ops.lock().push(ops);
                 }
             }
         }
@@ -502,10 +502,10 @@ impl<T: Clone + Send + Sync + 'static, B: Backend<T> + Send + Sync + 'static> St
             shared.shutdown.store(true, Ordering::Release);
             shared.notify.notify_one();
         }
-        if let Some(ref flusher) = self.flusher {
-            if let Some(handle) = flusher.handle.lock().take() {
-                let _ = handle.join();
-            }
+        if let Some(ref flusher) = self.flusher
+            && let Some(handle) = flusher.handle.lock().take()
+        {
+            let _ = handle.join();
         }
     }
 }
@@ -583,10 +583,10 @@ impl<T, B: Backend<T>> Drop for Store<T, B> {
             shared.shutdown.store(true, Ordering::Release);
             shared.notify.notify_one();
         }
-        if let Some(ref flusher) = self.flusher {
-            if let Some(handle) = flusher.handle.lock().take() {
-                let _ = handle.join();
-            }
+        if let Some(ref flusher) = self.flusher
+            && let Some(handle) = flusher.handle.lock().take()
+        {
+            let _ = handle.join();
         }
     }
 }
