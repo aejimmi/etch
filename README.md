@@ -4,21 +4,24 @@
 
 # etch
 
-A fast, embedded persistent store for Rust. No SQL. No ORM. No bloat.
+A fast, embedded persistent store for Rust. 5 dependencies. No C code. No build scripts.
 
-## Why
-
-We needed embedded storage for [Tell](https://tell.rs) and Turso/libsql was bloating our binary and dependency tree for what was essentially CRUD on structured data. So we built etch — 5 dependencies, no C code, no build scripts.
+We built etch for [Tell](https://tell.rs) after Turso/libsql bloated our binary and dependency tree for what was essentially CRUD on structured data. Your Rust structs live in memory, reads are direct field access, and a WAL keeps everything crash-safe on disk.
 
 ## What it is
 
-In-memory state with durable file-backed persistence. Reads are direct struct access behind an `RwLock`. Writes are atomic and crash-safe. Reads never block on writes.
-
-WAL with postcard binary serialization, two flush modes (immediate fsync, grouped batching).
+- In-memory state with durable file-backed persistence
+- Reads are direct struct access behind an `RwLock` — no deserialization, no disk I/O
+- Writes are atomic and crash-safe via WAL with xxh3 integrity checksums
+- 1.7M durable writes/sec, 32M reads/sec
+- 5 dependencies, pure Rust, compiles in seconds
 
 ## What it is not
 
-Not a database. No SQL, no joins, no replication. It stores your Rust structs to disk and gets out of the way. If you need more, use SQLite.
+- Not a database — no SQL, no query engine, no joins
+- Not for data larger than memory — your entire state lives in a struct
+- No replication, no networking, no multi-process access
+- No schema migrations — you own your types, you own your versioning
 
 ## Quick start
 
@@ -63,30 +66,27 @@ assert_eq!(state.items["key"], "value");
 
 ## Features
 
-- **Zero-copy reads** — `store.read()` returns an `RwLockReadGuard`, no cloning
-- **Crash-safe writes** — WAL with xxh3 integrity, automatic corruption recovery
 - **Snapshot compaction** — WAL auto-compacts after a configurable threshold
 - **Two flush modes** — immediate fsync or grouped batching for throughput
-- **Transaction capture** — `Overlay` + `Transactable` for zero-clone write paths
+- **Zero-clone writes** — `Overlay` + `Transactable` captures changes without cloning state
 - **Pluggable backends** — `WalBackend`, `PostcardBackend`, `NullBackend`, or bring your own
+- **Corruption recovery** — truncates incomplete WAL entries, keeps valid prefix
 
 ## Performance
 
-Apple M4 Pro, `--release`, 1,000 records seeded. Run yourself: `cargo run --example bench --release`
+Apple M4 Pro, `--release`. Run yourself: `cargo run --example bench --release`
 
-| Path | Operation | ops/sec |
-|---|---|---|
-| In-memory | Read (RwLock + BTreeMap) | 31,721,955 |
-| In-memory | Insert (zero-clone tx) | 2,328,562 |
-| In-memory | Update (zero-clone tx) | 2,005,985 |
-| In-memory | Read-then-write (zero-clone tx) | 1,832,342 |
-| WAL | 1K inserts per fsync | 218,870 recs/sec |
-| WAL | 100K inserts per fsync | 1,528,951 recs/sec |
-| WAL | 1M inserts per fsync | 1,682,808 recs/sec |
-| WAL | Read (10M records) | 36,449,154 |
-| WAL | Reload 10M from disk | 3.89s |
+| Operation | throughput |
+|---|---|
+| Read | 32M ops/sec |
+| Insert (in-memory) | 2.3M ops/sec |
+| Update (in-memory) | 2.0M ops/sec |
+| WAL write (1K batch) | 219K recs/sec |
+| WAL write (100K batch) | 1.5M recs/sec |
+| WAL write (1M batch) | 1.7M recs/sec |
+| WAL reload (10M records) | 3.9s |
 
-WAL write throughput plateaus at ~1.7M recs/sec — the ceiling is postcard serialization + BTreeMap insertion, not fsync. Batch your inserts into a single `write_tx` call. Use `FlushPolicy::Grouped` to decouple write latency from fsync entirely.
+WAL throughput plateaus at ~1.7M recs/sec — the ceiling is serialization + BTreeMap insertion, not fsync. Batch inserts into a single `write_tx` call for maximum throughput.
 
 ## License
 
