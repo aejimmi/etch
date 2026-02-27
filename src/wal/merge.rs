@@ -1,0 +1,31 @@
+//! Merge transaction overlays into committed state.
+//!
+//! After a transaction commits, its overlay is applied to the in-memory
+//! state in O(changed keys) — no full-state clone needed.
+
+use std::collections::BTreeMap;
+
+use super::overlay::Overlay;
+use super::Op;
+
+/// A type that supports zero-clone transaction capture.
+pub trait Transactable: Clone + Send + Sync + 'static {
+    type Tx<'a>
+    where
+        Self: 'a;
+    type Overlay;
+
+    fn begin_tx(&self) -> Self::Tx<'_>;
+    fn finish_tx(tx: Self::Tx<'_>) -> (Vec<Op>, Self::Overlay);
+    fn apply_overlay(&mut self, overlay: Self::Overlay);
+}
+
+/// Apply a transaction overlay to a committed BTreeMap.
+pub fn apply_overlay_map<V>(map: &mut BTreeMap<String, V>, overlay: Overlay<V>) {
+    for key in overlay.deletes {
+        map.remove(&key);
+    }
+    for (key, value) in overlay.puts {
+        map.insert(key, value);
+    }
+}
