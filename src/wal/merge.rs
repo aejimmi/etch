@@ -5,8 +5,8 @@
 
 use std::collections::BTreeMap;
 
-use super::overlay::Overlay;
 use super::Op;
+use super::overlay::Overlay;
 
 /// A type that supports zero-clone transaction capture.
 pub trait Transactable: Clone + Send + Sync + 'static {

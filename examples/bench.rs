@@ -239,7 +239,10 @@ fn main() {
             let load_time = start.elapsed();
             let count = store4.read().users.len();
             assert_eq!(count, total_records);
-            println!("  {:<30} {:>9} records  ({load_time:.2?})\n", "WAL reload", count);
+            println!(
+                "  {:<30} {:>9} records  ({load_time:.2?})\n",
+                "WAL reload", count
+            );
         }
     }
 

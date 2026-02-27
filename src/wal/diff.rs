@@ -3,7 +3,7 @@
 //! Computes the minimal set of `Op`s to transform `before` into `after`
 //! by walking each BTreeMap in key order. O(changed keys), not O(total).
 
-use serde::{de::DeserializeOwned, Serialize};
+use serde::{Serialize, de::DeserializeOwned};
 use std::collections::BTreeMap;
 
 use super::op::Op;

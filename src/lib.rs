@@ -58,6 +58,6 @@ pub use backend::{Backend, NullBackend, PostcardBackend};
 pub use error::{Error, Result};
 pub use store::{FlushPolicy, Ref, Store};
 pub use wal::{
-    apply_op, apply_overlay_map, diff_map, Diffable, IncrementalSave, Op, Overlay, Transactable,
-    WalBackend,
+    Diffable, IncrementalSave, Op, Overlay, Transactable, WalBackend, apply_op, apply_overlay_map,
+    diff_map,
 };

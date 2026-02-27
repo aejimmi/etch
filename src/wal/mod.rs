@@ -17,8 +17,8 @@ mod op;
 pub mod overlay;
 mod writer;
 
-pub use diff::{apply_op, diff_map, Diffable};
-pub use merge::{apply_overlay_map, Transactable};
+pub use diff::{Diffable, apply_op, diff_map};
+pub use merge::{Transactable, apply_overlay_map};
 pub use op::Op;
 pub use overlay::Overlay;
 pub use writer::{IncrementalSave, WalBackend};

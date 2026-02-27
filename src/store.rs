@@ -12,10 +12,10 @@
 //!   mutations are folded in.
 
 use parking_lot::{Condvar, Mutex, RwLock, RwLockReadGuard};
-use serde::{de::DeserializeOwned, Serialize};
+use serde::{Serialize, de::DeserializeOwned};
 use std::path::PathBuf;
-use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::time::Duration;
 
 use crate::backend::{Backend, NullBackend, PostcardBackend};

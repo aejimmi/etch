@@ -3,7 +3,7 @@
 //! The `Backend` trait decouples the `Store` concurrency engine from the
 //! serialization format and storage medium.
 
-use serde::{de::DeserializeOwned, Serialize};
+use serde::{Serialize, de::DeserializeOwned};
 use std::io::Write;
 use std::path::{Path, PathBuf};
 

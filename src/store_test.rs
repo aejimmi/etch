@@ -1,7 +1,7 @@
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
-use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::Duration;
 use tempfile::TempDir;
 
@@ -231,6 +231,7 @@ struct CountingBackend {
     inner: Arc<CountingInner>,
 }
 
+#[allow(dead_code)]
 impl CountingBackend {
     fn new() -> Self {
         Self {

@@ -5,7 +5,7 @@
 //! IncrementalSave: append ops to WAL buffer, fsync on demand, snapshot when threshold hit.
 
 use parking_lot::Mutex;
-use serde::{de::DeserializeOwned, Serialize};
+use serde::{Serialize, de::DeserializeOwned};
 use std::io::Write;
 use std::marker::PhantomData;
 use std::path::{Path, PathBuf};
