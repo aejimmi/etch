@@ -2,7 +2,8 @@
 //!
 //! Generic `Store<T, B>` that holds state in memory behind an `RwLock` and
 //! delegates persistence to a `Backend`. Reads are zero-copy borrows; writes
-//! clone-then-persist so the read lock is only held briefly.
+//! use transaction capture (overlay + ops) so the read lock is only held
+//! briefly during merge.
 //!
 //! # Flush Policies
 //!
@@ -20,7 +21,7 @@ use std::time::Duration;
 
 use crate::backend::{Backend, NullBackend, PostcardBackend};
 use crate::error::{Error, Result};
-use crate::wal::{Diffable, IncrementalSave, Op, Transactable, WalBackend};
+use crate::wal::{IncrementalSave, Op, Replayable, Transactable, WalBackend};
 
 /// Controls how writes are persisted to disk.
 #[derive(Debug, Clone)]
@@ -57,12 +58,13 @@ struct FlushState {
 
 /// Persistent state store.
 ///
-/// Holds `T` in memory behind a read-write lock. On write, the state is
-/// cloned, mutated, persisted via the backend, and then swapped in.
+/// Holds `T` in memory behind a read-write lock. On write, mutations execute
+/// against a transaction overlay that captures ops directly. The overlay is
+/// merged into state in O(changed keys).
 ///
 /// A separate `Mutex` serializes writers so the `RwLock` write-lock is held
-/// only for the final in-memory swap (~microseconds), keeping reads unblocked
-/// during the persist (~25ms for JSON+fsync).
+/// only for the final overlay merge (~microseconds), keeping reads unblocked
+/// during persistence.
 pub struct Store<T, B: Backend<T> = NullBackend> {
     state: Arc<RwLock<T>>,
     write_gate: Mutex<()>,
@@ -117,7 +119,7 @@ impl<T: Default> Store<T, NullBackend> {
     }
 }
 
-impl<T: Diffable + Serialize + DeserializeOwned + Default> Store<T, WalBackend<T>> {
+impl<T: Replayable + Serialize + DeserializeOwned + Default> Store<T, WalBackend<T>> {
     /// Open store with WAL backend. Immediate mode (every write fsyncs WAL).
     pub fn open_wal(dir: PathBuf) -> Result<Self> {
         let backend = WalBackend::open(&dir)?;
@@ -170,156 +172,18 @@ impl<T: Clone, B: Backend<T>> Store<T, B> {
     }
 }
 
-// Write methods — branching on whether incremental save (WAL) is available.
-impl<T: Clone, B: Backend<T>> Store<T, B> {
-    /// Atomic write transaction.
-    ///
-    /// **With WAL (Immediate)**: clone → mutate → diff → append ops → fsync WAL → swap.
-    /// **With WAL (Grouped)**: clone → mutate → diff → append ops → swap → bump gen.
-    /// **Without WAL (Immediate)**: clone → mutate → backend.save() → swap.
-    /// **Without WAL (Grouped)**: clone → mutate → swap → bump gen.
-    pub fn write<F, R>(&self, f: F) -> Result<R>
-    where
-        F: FnOnce(&mut T) -> Result<R>,
-        T: Diffable,
-    {
-        let _gate = self.write_gate.lock();
-
-        // In grouped mode, fail-fast if flusher had an error.
-        if let Some(ref shared) = self.shared
-            && let Some(err) = shared.last_error.lock().take()
-        {
-            return Err(err);
-        }
-
-        if let Some(ref inc) = self.incremental {
-            // WAL path: clone → mutate → diff against current state → persist.
-            let mut draft = self.state.read().clone();
-            let result = f(&mut draft)?;
-
-            // Diff draft (new) against current state (old) while read-lockable.
-            // This avoids a second clone for the "before" snapshot.
-            let ops = {
-                let current = self.state.read();
-                T::diff(&current, &draft)
-            };
-            if !ops.is_empty() {
-                match &self.shared {
-                    None => {
-                        // Immediate: write + fsync now.
-                        inc.save_ops(&ops)?;
-                        inc.sync()?;
-                    }
-                    Some(shared) => {
-                        // Grouped: buffer ops in memory; flusher drains them.
-                        shared.pending_ops.lock().push(ops);
-                    }
-                }
-            }
-            *self.state.write() = draft;
-
-            if let Some(ref shared) = self.shared {
-                shared.gen_written.fetch_add(1, Ordering::Release);
-                shared.notify.notify_one();
-            }
-
-            Ok(result)
-        } else {
-            // Non-WAL path: single clone.
-            let mut draft = self.state.read().clone();
-            let result = f(&mut draft)?;
-
-            match &self.shared {
-                None => {
-                    self.backend.save(&draft)?;
-                    *self.state.write() = draft;
-                }
-                Some(shared) => {
-                    *self.state.write() = draft;
-                    shared.gen_written.fetch_add(1, Ordering::Release);
-                    shared.notify.notify_one();
-                }
-            }
-
-            Ok(result)
-        }
-    }
-
-    /// Atomic write with guaranteed immediate persistence.
-    ///
-    /// With WAL: diff → append → fsync → swap.
-    /// Without WAL: full backend.save() → swap.
-    pub fn write_durable<F, R>(&self, f: F) -> Result<R>
-    where
-        F: FnOnce(&mut T) -> Result<R>,
-        T: Diffable,
-    {
-        let _gate = self.write_gate.lock();
-
-        if let Some(ref inc) = self.incremental {
-            // WAL path: diff + append + fsync.
-            let mut draft = self.state.read().clone();
-            let result = f(&mut draft)?;
-
-            let ops = {
-                let current = self.state.read();
-                T::diff(&current, &draft)
-            };
-
-            // In grouped mode, drain any pending buffered ops first so
-            // the WAL is sequential before we write + fsync our own ops.
-            if let Some(ref shared) = self.shared {
-                let batched: Vec<Vec<Op>> = {
-                    let mut pending = shared.pending_ops.lock();
-                    std::mem::take(&mut *pending)
-                };
-                for batch in &batched {
-                    inc.save_ops(batch)?;
-                }
-            }
-
-            if !ops.is_empty() {
-                inc.save_ops(&ops)?;
-            }
-            inc.sync()?;
-            *self.state.write() = draft;
-
-            if let Some(ref shared) = self.shared {
-                let generation = shared.gen_written.fetch_add(1, Ordering::Release) + 1;
-                shared.gen_flushed.store(generation, Ordering::Release);
-            }
-
-            Ok(result)
-        } else {
-            // Non-WAL path: full persist.
-            let mut draft = self.state.read().clone();
-            let result = f(&mut draft)?;
-            self.backend.save(&draft)?;
-            *self.state.write() = draft;
-
-            if let Some(ref shared) = self.shared {
-                let generation = shared.gen_written.fetch_add(1, Ordering::Release) + 1;
-                shared.gen_flushed.store(generation, Ordering::Release);
-            }
-
-            Ok(result)
-        }
-    }
-}
-
-// Transaction-capture write methods — zero-clone fast path.
+// Write methods — zero-clone transaction capture.
 impl<T: Transactable, B: Backend<T>> Store<T, B> {
-    /// Zero-clone write via transaction capture.
+    /// Atomic write via transaction capture.
     ///
-    /// Instead of clone → mutate → diff, this borrows committed state via a
-    /// read lock, executes mutations against an overlay that captures ops
-    /// directly, then merges the overlay into state. O(changed keys), not
-    /// O(total entries).
+    /// Borrows committed state via a read lock, executes mutations against an
+    /// overlay that captures ops directly, then merges the overlay into state.
+    /// O(changed keys), not O(total entries).
     ///
     /// **With WAL (Immediate)**: begin_tx → mutate → finish → append ops → fsync → merge.
     /// **With WAL (Grouped)**: begin_tx → mutate → finish → buffer ops → merge → bump gen.
     /// **Without WAL**: falls through to overlay merge only (no persistence).
-    pub fn write_tx<F, R>(&self, f: F) -> Result<R>
+    pub fn write<F, R>(&self, f: F) -> Result<R>
     where
         F: for<'a> FnOnce(&mut T::Tx<'a>) -> Result<R>,
     {
@@ -339,18 +203,33 @@ impl<T: Transactable, B: Backend<T>> Store<T, B> {
         let (ops, overlay) = T::finish_tx(tx);
         drop(state_guard); // release read lock before write lock
 
-        if !ops.is_empty()
-            && let Some(ref inc) = self.incremental
-        {
-            match &self.shared {
-                None => {
-                    inc.save_ops(&ops)?;
-                    inc.sync()?;
-                }
-                Some(shared) => {
-                    shared.pending_ops.lock().push(ops);
+        // Persist, then merge overlay into in-memory state.
+        if let Some(ref inc) = self.incremental {
+            // WAL path: append ops, then sync or buffer.
+            if !ops.is_empty() {
+                match &self.shared {
+                    None => {
+                        inc.save_ops(&ops)?;
+                        inc.sync()?;
+                    }
+                    Some(shared) => {
+                        shared.pending_ops.lock().push(ops);
+                    }
                 }
             }
+        } else {
+            // Non-WAL path: merge overlay first, then persist full state.
+            self.state.write().apply_overlay(overlay);
+            match &self.shared {
+                None => {
+                    self.backend.save(&self.state.read())?;
+                }
+                Some(shared) => {
+                    shared.gen_written.fetch_add(1, Ordering::Release);
+                    shared.notify.notify_one();
+                }
+            }
+            return Ok(result);
         }
 
         self.state.write().apply_overlay(overlay);
@@ -363,8 +242,11 @@ impl<T: Transactable, B: Backend<T>> Store<T, B> {
         Ok(result)
     }
 
-    /// Zero-clone write with guaranteed immediate persistence.
-    pub fn write_tx_durable<F, R>(&self, f: F) -> Result<R>
+    /// Atomic write with guaranteed immediate persistence.
+    ///
+    /// Same as `write()` but forces an immediate fsync regardless of flush
+    /// policy. Use for critical writes that must survive a crash.
+    pub fn write_durable<F, R>(&self, f: F) -> Result<R>
     where
         F: for<'a> FnOnce(&mut T::Tx<'a>) -> Result<R>,
     {
@@ -377,7 +259,7 @@ impl<T: Transactable, B: Backend<T>> Store<T, B> {
         drop(state_guard);
 
         if let Some(ref inc) = self.incremental {
-            // Drain pending ops first in grouped mode.
+            // WAL path: drain pending ops, append ours, fsync.
             if let Some(ref shared) = self.shared {
                 let batched: Vec<Vec<Op>> = {
                     let mut pending = shared.pending_ops.lock();
@@ -392,6 +274,15 @@ impl<T: Transactable, B: Backend<T>> Store<T, B> {
                 inc.save_ops(&ops)?;
             }
             inc.sync()?;
+        } else {
+            // Non-WAL path: merge overlay, then full persist.
+            self.state.write().apply_overlay(overlay);
+            self.backend.save(&self.state.read())?;
+            if let Some(ref shared) = self.shared {
+                let generation = shared.gen_written.fetch_add(1, Ordering::Release) + 1;
+                shared.gen_flushed.store(generation, Ordering::Release);
+            }
+            return Ok(result);
         }
 
         self.state.write().apply_overlay(overlay);

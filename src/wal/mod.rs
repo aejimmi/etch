@@ -17,7 +17,7 @@ mod op;
 pub mod overlay;
 mod writer;
 
-pub use diff::{Diffable, apply_op, diff_map};
+pub use diff::{Replayable, apply_op};
 pub use merge::{Transactable, apply_overlay_map};
 pub use op::Op;
 pub use overlay::Overlay;
@@ -30,3 +30,15 @@ mod format_test;
 #[cfg(test)]
 #[path = "overlay_test.rs"]
 mod overlay_test;
+
+#[cfg(test)]
+#[path = "writer_test.rs"]
+mod writer_test;
+
+#[cfg(test)]
+#[path = "diff_test.rs"]
+mod diff_test;
+
+#[cfg(test)]
+#[path = "merge_test.rs"]
+mod merge_test;

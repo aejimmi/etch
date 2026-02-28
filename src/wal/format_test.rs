@@ -193,3 +193,161 @@ fn empty_ops_not_written() {
 
     assert_eq!(wal.offset(), 16); // No entries written.
 }
+
+#[test]
+fn bad_magic_detected() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("wal.bin");
+
+    // Write a file with bad magic bytes.
+    std::fs::write(
+        &path,
+        b"BAAD\x02\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00",
+    )
+    .unwrap();
+
+    let result = WalFile::iter_entries(&path);
+    assert!(result.is_err());
+    let err = result.unwrap_err();
+    assert!(
+        err.to_string().contains("bad magic"),
+        "expected bad magic error, got: {err}"
+    );
+}
+
+#[test]
+fn bad_version_detected() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("wal.bin");
+
+    // Write header with correct magic but wrong version (99).
+    std::fs::write(
+        &path,
+        b"EWAL\x63\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00",
+    )
+    .unwrap();
+
+    let result = WalFile::iter_entries(&path);
+    assert!(result.is_err());
+    let err = result.unwrap_err();
+    assert!(
+        err.to_string().contains("unsupported version"),
+        "expected version error, got: {err}"
+    );
+}
+
+#[test]
+fn file_too_short_for_header() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("wal.bin");
+
+    // Write only 4 bytes — less than the 16-byte header.
+    std::fs::write(&path, b"EWAL").unwrap();
+
+    let result = WalFile::iter_entries(&path);
+    assert!(result.is_err());
+    let err = result.unwrap_err();
+    assert!(
+        err.to_string().contains("too short"),
+        "expected too-short error, got: {err}"
+    );
+}
+
+#[test]
+fn truncate_at_removes_trailing_data() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("wal.bin");
+
+    let ops1 = vec![Op::Put {
+        collection: 0,
+        key: "u1".into(),
+        value: vec![1],
+    }];
+    let ops2 = vec![Op::Put {
+        collection: 0,
+        key: "u2".into(),
+        value: vec![2],
+    }];
+
+    let offset_after_first;
+    {
+        let mut wal = WalFile::open(&path).unwrap();
+        wal.append(&ops1).unwrap();
+        wal.sync().unwrap();
+        offset_after_first = wal.offset();
+
+        wal.append(&ops2).unwrap();
+        wal.sync().unwrap();
+    }
+
+    // Verify both entries exist.
+    let (entries, _) = WalFile::iter_entries(&path).unwrap();
+    assert_eq!(entries.len(), 2);
+
+    // Truncate after first entry.
+    WalFile::truncate_at(&path, offset_after_first).unwrap();
+
+    // Only first entry should remain.
+    let (entries, _) = WalFile::iter_entries(&path).unwrap();
+    assert_eq!(entries.len(), 1);
+    assert_eq!(entries[0], ops1);
+}
+
+#[test]
+fn partial_length_at_end_of_file() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("wal.bin");
+
+    // Create valid WAL then append just 2 bytes (partial length field).
+    {
+        let mut wal = WalFile::open(&path).unwrap();
+        wal.sync().unwrap();
+    }
+
+    {
+        let mut f = std::fs::OpenOptions::new()
+            .append(true)
+            .open(&path)
+            .unwrap();
+        f.write_all(&[0x01, 0x00]).unwrap(); // 2 bytes < 4 byte len field
+        f.sync_all().unwrap();
+    }
+
+    let (entries, valid_offset) = WalFile::iter_entries(&path).unwrap();
+    assert!(entries.is_empty());
+    assert_eq!(valid_offset, 16); // Only header is valid.
+}
+
+#[test]
+fn valid_hash_but_invalid_postcard() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("wal.bin");
+
+    // Create valid WAL header.
+    {
+        let mut wal = WalFile::open(&path).unwrap();
+        wal.sync().unwrap();
+    }
+
+    // Manually append an entry with a correct xxh3 hash but junk payload
+    // that isn't valid postcard for Vec<Op>.
+    {
+        let payload = b"definitely not valid postcard";
+        let len = payload.len() as u32;
+        let hash = xxhash_rust::xxh3::xxh3_64(payload);
+
+        let mut f = std::fs::OpenOptions::new()
+            .append(true)
+            .open(&path)
+            .unwrap();
+        f.write_all(&len.to_le_bytes()).unwrap();
+        f.write_all(payload).unwrap();
+        f.write_all(&hash.to_le_bytes()).unwrap();
+        f.sync_all().unwrap();
+    }
+
+    // Hash passes, but postcard deserialization fails → entry is skipped.
+    let (entries, valid_offset) = WalFile::iter_entries(&path).unwrap();
+    assert!(entries.is_empty());
+    assert_eq!(valid_offset, 16); // Only header is valid.
+}

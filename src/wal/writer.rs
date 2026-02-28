@@ -11,7 +11,7 @@ use std::marker::PhantomData;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 
-use super::diff::Diffable;
+use super::diff::Replayable;
 use super::format::WalFile;
 use super::op::Op;
 use crate::backend::Backend;
@@ -23,7 +23,7 @@ const DEFAULT_SNAPSHOT_THRESHOLD: u64 = 1000;
 ///
 /// Stores state as a postcard snapshot + append-only WAL of diffs.
 /// Snapshots compact the WAL when entry count exceeds the threshold.
-pub struct WalBackend<T: Diffable> {
+pub struct WalBackend<T: Replayable> {
     dir: PathBuf,
     wal: Mutex<WalFile>,
     entry_count: AtomicU64,
@@ -31,7 +31,7 @@ pub struct WalBackend<T: Diffable> {
     _phantom: PhantomData<T>,
 }
 
-impl<T: Diffable + Serialize + DeserializeOwned + Default> WalBackend<T> {
+impl<T: Replayable + Serialize + DeserializeOwned + Default> WalBackend<T> {
     /// Open a WAL backend in the given directory.
     ///
     /// Creates the directory if needed.
@@ -43,12 +43,9 @@ impl<T: Diffable + Serialize + DeserializeOwned + Default> WalBackend<T> {
         let wal = WalFile::open(&wal_path)?;
 
         // Count existing entries for snapshot threshold tracking.
-        let entry_count = if wal_path.exists() {
-            let (entries, _) = WalFile::iter_entries(&wal_path)?;
-            entries.len() as u64
-        } else {
-            0
-        };
+        // Note: WalFile::open always creates the file, so it exists here.
+        let (entries, _) = WalFile::iter_entries(&wal_path)?;
+        let entry_count = entries.len() as u64;
 
         Ok(Self {
             dir,
@@ -87,19 +84,18 @@ impl<T: Diffable + Serialize + DeserializeOwned + Default> WalBackend<T> {
         };
 
         // Replay WAL.
+        // Note: open() always creates the WAL file, so it exists here.
         let wal_path = self.wal_path();
-        if wal_path.exists() {
-            let (entries, valid_offset) = WalFile::iter_entries(&wal_path)?;
-            let file_len = std::fs::metadata(&wal_path)?.len();
+        let (entries, valid_offset) = WalFile::iter_entries(&wal_path)?;
+        let file_len = std::fs::metadata(&wal_path)?.len();
 
-            for ops in &entries {
-                state.apply(ops)?;
-            }
+        for ops in &entries {
+            state.apply(ops)?;
+        }
 
-            // Truncate at corruption point if needed.
-            if valid_offset < file_len {
-                WalFile::truncate_at(&wal_path, valid_offset)?;
-            }
+        // Truncate at corruption point if needed.
+        if valid_offset < file_len {
+            WalFile::truncate_at(&wal_path, valid_offset)?;
         }
 
         Ok(state)
@@ -132,7 +128,7 @@ impl<T: Diffable + Serialize + DeserializeOwned + Default> WalBackend<T> {
     }
 }
 
-impl<T: Diffable + Serialize + DeserializeOwned + Default> Backend<T> for WalBackend<T> {
+impl<T: Replayable + Serialize + DeserializeOwned + Default> Backend<T> for WalBackend<T> {
     fn load(&self) -> Result<T> {
         self.load_state()
     }
@@ -154,7 +150,7 @@ pub trait IncrementalSave<T>: Send + Sync {
     fn snapshot(&self, state: &T) -> Result<()>;
 }
 
-impl<T: Diffable + Serialize + DeserializeOwned + Default> IncrementalSave<T> for WalBackend<T> {
+impl<T: Replayable + Serialize + DeserializeOwned + Default> IncrementalSave<T> for WalBackend<T> {
     fn save_ops(&self, ops: &[Op]) -> Result<()> {
         if ops.is_empty() {
             return Ok(());
