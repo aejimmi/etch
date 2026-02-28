@@ -1,5 +1,10 @@
 # Changelog
 
+## v0.2.1
+
+- crate: renamed to etchdb (etch was taken on crates.io)
+- crate: description updated to match README tagline
+
 ## v0.2.0
 
 New:

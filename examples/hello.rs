@@ -4,7 +4,7 @@
 //!
 //! Run with: `cargo run --example hello`
 
-use etch::{Op, Overlay, Store, Transactable};
+use etchdb::{Op, Overlay, Store, Transactable};
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 

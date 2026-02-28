@@ -4,7 +4,7 @@
 //!
 //! Run with: `cargo bench`
 
-use etch::{Op, Overlay, Replayable, Store, Transactable, WalBackend};
+use etchdb::{Op, Overlay, Replayable, Store, Transactable, WalBackend};
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 use std::time::Instant;

@@ -1,8 +1,8 @@
 [package]
-name = "etch"
+name = "etchdb"
 version = "0.2.0"
 edition = "2024"
-description = "Lightweight embedded store with Write-Ahead Log"
+description = "A fast, embedded database for Rust. 5 dependencies. No C code. No build scripts."
 license = "MIT"
 repository = "https://github.com/tell-rs/etch"
 authors = ["Tell Contributors"]

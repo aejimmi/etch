@@ -15,7 +15,7 @@
 //! # Quick start
 //!
 //! ```rust
-//! use etch::{Store, Replayable, Op, Overlay, Transactable};
+//! use etchdb::{Store, Replayable, Op, Overlay, Transactable};
 //! use serde::{Serialize, Deserialize};
 //! use std::collections::BTreeMap;
 //!
