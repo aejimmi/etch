@@ -22,7 +22,7 @@ If you have structured application state and you're using SQLite or Turso for wh
 - An embedded database — durable, crash-safe storage and retrieval of structured data
 - Reads are direct struct access behind an `RwLock` — no deserialization, no disk I/O
 - Writes are atomic and crash-safe via WAL with xxh3 integrity checksums
-- 1.7M durable writes/sec, 79M reads/sec
+- 1.7M durable writes/s, 79M reads/s (per record)
 - 5 dependencies, pure Rust, compiles in seconds
 - Rust-only by design — your data is your types. If you want language-agnostic access, use [Turso](https://turso.tech). If you want zero-overhead typed access from Rust, use etch.
 
@@ -80,17 +80,19 @@ cargo run --example contacts
 
 Apple M4 Pro, `--release`. Run yourself: `cargo bench`
 
-| Operation | throughput |
+Each operation is one record — a single struct read or written.
+
+| Operation | Throughput |
 |---|---|
-| Read | 79M ops/sec |
-| Insert (in-memory) | 2.4M ops/sec |
-| Update (in-memory) | 2.2M ops/sec |
-| WAL write (1K batch) | 220K recs/sec |
-| WAL write (100K batch) | 1.7M recs/sec |
-| WAL write (1M batch) | 1.7M recs/sec |
+| Read | 79M/s |
+| Insert | 2.4M/s |
+| Update | 2.2M/s |
+| WAL insert (1K per commit) | 220K/s |
+| WAL insert (100K per commit) | 1.7M/s |
+| WAL insert (1M per commit) | 1.7M/s |
 | WAL reload (10M records) | 3.8s |
 
-WAL throughput plateaus at ~1.7M recs/sec — the ceiling is serialization + BTreeMap insertion, not fsync. Batch inserts into a single `write` call for maximum throughput.
+WAL throughput plateaus at ~1.7M/s — the ceiling is serialization + BTreeMap insertion, not fsync. Batch inserts into a single `write` call for maximum throughput.
 
 ## License
 
