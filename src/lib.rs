@@ -9,7 +9,7 @@
 //! Store<T, B>
 //!   ├── RwLock<T>        ← in-memory state, zero-copy reads
 //!   ├── Mutex<()>        ← serializes writers (reads unblocked during persist)
-//!   └── Backend<T>       ← pluggable: NullBackend, PostcardBackend, WalBackend
+//!   └── Backend<T>       ← pluggable: WalBackend, NullBackend, or bring your own
 //! ```
 //!
 //! # Quick start
@@ -85,7 +85,7 @@ pub mod error;
 pub mod store;
 pub mod wal;
 
-pub use backend::{Backend, NullBackend, PostcardBackend};
+pub use backend::{Backend, NullBackend};
 pub use error::{Error, Result};
 pub use store::{FlushPolicy, Ref, Store};
 pub use wal::{

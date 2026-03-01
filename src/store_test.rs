@@ -5,7 +5,7 @@ use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::time::Duration;
 use tempfile::TempDir;
 
-use crate::backend::{Backend, NullBackend, PostcardBackend};
+use crate::backend::{Backend, NullBackend};
 use crate::error::Error;
 use crate::store::{FlushPolicy, Store};
 use crate::wal::{
@@ -78,7 +78,6 @@ impl Transactable for TestState {
     }
 }
 
-type FileStore = Store<TestState, PostcardBackend>;
 type WalStore = Store<TestState, WalBackend<TestState>>;
 
 #[test]
@@ -95,30 +94,6 @@ fn memory_store_read_write() {
     let state = store.read();
     assert_eq!(state.items.get("a").unwrap(), "1");
     assert_eq!(state.items.len(), 1);
-}
-
-#[test]
-fn file_store_persists_across_opens() {
-    let dir = TempDir::new().unwrap();
-    let path = dir.path().join("state.postcard");
-
-    // Write
-    {
-        let store: FileStore = Store::open_postcard(path.clone()).unwrap();
-        store
-            .write(|tx| {
-                tx.insert("key", "value");
-                Ok(())
-            })
-            .unwrap();
-    }
-
-    // Re-open and verify
-    {
-        let store: FileStore = Store::open_postcard(path).unwrap();
-        let state = store.read();
-        assert_eq!(state.items.get("key").unwrap(), "value");
-    }
 }
 
 #[test]
@@ -140,80 +115,6 @@ fn write_rollback_on_error() {
     let state = store.read();
     assert!(state.items.contains_key("good"));
     assert!(!state.items.contains_key("bad"));
-}
-
-#[test]
-fn open_missing_file_returns_default() {
-    let dir = TempDir::new().unwrap();
-    let path = dir.path().join("nonexistent.postcard");
-
-    let store: FileStore = Store::open_postcard(path).unwrap();
-    assert!(store.read().items.is_empty());
-}
-
-#[test]
-fn backup_file_created_on_write() {
-    let dir = TempDir::new().unwrap();
-    let path = dir.path().join("state.postcard");
-    let bak = dir.path().join("state.bak");
-
-    let store: FileStore = Store::open_postcard(path.clone()).unwrap();
-
-    // First write — no backup yet (no prior file)
-    store
-        .write(|tx| {
-            tx.insert("v1", "1");
-            Ok(())
-        })
-        .unwrap();
-
-    // Second write — should create backup of first state
-    store
-        .write(|tx| {
-            tx.insert("v2", "2");
-            Ok(())
-        })
-        .unwrap();
-
-    assert!(bak.exists(), "backup file should exist after second write");
-
-    // Backup should contain v1 state (before second write)
-    let bak_bytes = std::fs::read(&bak).unwrap();
-    let bak_state: TestState = postcard::from_bytes(&bak_bytes).unwrap();
-    assert!(bak_state.items.contains_key("v1"));
-    assert!(!bak_state.items.contains_key("v2"));
-}
-
-#[test]
-fn recovery_from_backup() {
-    let dir = TempDir::new().unwrap();
-    let path = dir.path().join("state.postcard");
-    let bak = dir.path().join("state.bak");
-
-    // Create a backup file directly (simulating crash after persist)
-    let state = TestState {
-        items: BTreeMap::from([("recovered".into(), "yes".into())]),
-    };
-    std::fs::write(&bak, postcard::to_allocvec(&state).unwrap()).unwrap();
-
-    // Open with missing main file — should load backup
-    let store: FileStore = Store::open_postcard(path).unwrap();
-    assert_eq!(store.read().items.get("recovered").unwrap(), "yes");
-}
-
-#[test]
-fn tmp_file_cleaned_on_open() {
-    let dir = TempDir::new().unwrap();
-    let path = dir.path().join("state.postcard");
-    let tmp = dir.path().join("state.tmp");
-
-    // Create main file and stale tmp (valid empty postcard state)
-    let empty = postcard::to_allocvec(&TestState::default()).unwrap();
-    std::fs::write(&path, &empty).unwrap();
-    std::fs::write(&tmp, b"stale").unwrap();
-
-    let _store: FileStore = Store::open_postcard(path).unwrap();
-    assert!(!tmp.exists(), "stale tmp should be cleaned up on open");
 }
 
 #[test]
@@ -469,11 +370,10 @@ fn flush_error_returns_latest() {
 #[test]
 fn group_commit_file_backed_persists() {
     let dir = TempDir::new().unwrap();
-    let path = dir.path().join("state.postcard");
 
     // Write with grouped policy, then drop.
     {
-        let mut store: FileStore = Store::open_postcard(path.clone()).unwrap();
+        let mut store: WalStore = Store::open_wal(dir.path().to_path_buf()).unwrap();
         store.set_flush_policy(FlushPolicy::Grouped {
             interval: Duration::from_millis(50),
         });
@@ -490,7 +390,7 @@ fn group_commit_file_backed_persists() {
 
     // Re-open and verify everything persisted.
     {
-        let store: FileStore = Store::open_postcard(path).unwrap();
+        let store: WalStore = Store::open_wal(dir.path().to_path_buf()).unwrap();
         let state = store.read();
         assert_eq!(state.items.len(), 10);
         assert_eq!(state.items.get("k9").unwrap(), "v9");
@@ -888,15 +788,6 @@ fn close_shuts_down_flusher() {
 }
 
 #[test]
-fn postcard_backend_path_accessor() {
-    let dir = TempDir::new().unwrap();
-    let path = dir.path().join("state.postcard");
-
-    let store: FileStore = Store::open_postcard(path.clone()).unwrap();
-    assert_eq!(store.backend().path(), path);
-}
-
-#[test]
 fn wal_store_grouped_empty_write_noop() {
     // Exercises the WAL grouped path where ops is empty (line 219).
     let dir = TempDir::new().unwrap();
@@ -1144,23 +1035,4 @@ fn null_backend_load_via_with_backend() {
     // Covers NullBackend::load (backend.rs lines 94-96).
     let store: Store<TestState, NullBackend> = Store::with_backend(NullBackend).unwrap();
     assert!(store.read().items.is_empty());
-}
-
-#[test]
-fn postcard_backend_load_non_notfound_error() {
-    // Covers backend.rs line 60 — I/O error that isn't NotFound.
-    let dir = TempDir::new().unwrap();
-    let path = dir.path().join("state.postcard");
-
-    // Create a directory at the file path — reading it will fail with a non-NotFound error.
-    std::fs::create_dir(&path).unwrap();
-
-    let backend = PostcardBackend::new(path).unwrap();
-    let result: crate::error::Result<TestState> = backend.load();
-    assert!(result.is_err());
-
-    match result.unwrap_err() {
-        Error::Io(e) => assert_ne!(e.kind(), std::io::ErrorKind::NotFound),
-        other => panic!("expected Io error, got: {other}"),
-    }
 }

@@ -19,7 +19,7 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::time::Duration;
 
-use crate::backend::{Backend, NullBackend, PostcardBackend};
+use crate::backend::{Backend, NullBackend};
 use crate::error::{Error, Result};
 use crate::wal::{IncrementalSave, Op, Replayable, Transactable, WalBackend};
 
@@ -85,23 +85,6 @@ impl<'a, T> std::ops::Deref for Ref<'a, T> {
     type Target = T;
     fn deref(&self) -> &T {
         &self.0
-    }
-}
-
-impl<T: Serialize + DeserializeOwned + Clone + Default> Store<T, PostcardBackend> {
-    /// Open store from disk using the postcard binary backend.
-    /// Falls back to `.bak`, then `T::default()`.
-    pub fn open_postcard(path: PathBuf) -> Result<Self> {
-        let backend = PostcardBackend::new(path)?;
-        let state = backend.load()?;
-        Ok(Self {
-            state: Arc::new(RwLock::new(state)),
-            write_gate: Mutex::new(()),
-            backend: Arc::new(backend),
-            incremental: None,
-            shared: None,
-            flusher: None,
-        })
     }
 }
 

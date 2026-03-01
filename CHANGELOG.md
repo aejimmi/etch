@@ -1,5 +1,10 @@
 # Changelog
 
+## v0.2.2
+
+- backend: remove PostcardBackend and Store::open_postcard — WAL is the only file-backed path
+- store: group_commit test migrated from PostcardBackend to WalBackend
+
 ## v0.2.1
 
 - crate: renamed to etchdb (etch was taken on crates.io)

@@ -73,7 +73,7 @@ cargo run --example contacts
 - **Snapshot compaction** — WAL auto-compacts after a configurable threshold
 - **Two flush modes** — immediate fsync or grouped batching for throughput
 - **Zero-clone writes** — `Overlay` + `Transactable` captures changes without cloning state
-- **Pluggable backends** — `WalBackend`, `PostcardBackend`, `NullBackend`, or bring your own
+- **Pluggable backends** — `WalBackend`, `NullBackend`, or bring your own
 - **Corruption recovery** — truncates incomplete WAL entries, keeps valid prefix
 
 ## Performance
@@ -91,8 +91,6 @@ Each operation is one record — a single struct read or written.
 | WAL insert (100K per commit) | 1.7M/s |
 | WAL insert (1M per commit) | 1.7M/s |
 | WAL reload (10M records) | 3.8s |
-
-WAL throughput plateaus at ~1.7M/s — the ceiling is serialization + BTreeMap insertion, not fsync. Batch inserts into a single `write` call for maximum throughput.
 
 ## License
 
