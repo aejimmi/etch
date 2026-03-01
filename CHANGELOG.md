@@ -1,5 +1,9 @@
 # Changelog
 
+## v0.3.1
+
+- async: AsyncStore::open_wal for opening WAL-backed stores directly from async contexts
+
 ## v0.3.0
 
 New:

@@ -98,7 +98,7 @@ cargo run --example contacts
 ## Features
 
 - **Derive macros** — `#[derive(Replayable, Transactable)]` eliminates ~60 lines of boilerplate per state type
-- **Async support** — `AsyncStore` wraps any store for tokio runtimes via `block_in_place`
+- **Async support** — `AsyncStore::open_wal` + async `write`/`flush` for tokio runtimes via `block_in_place`
 - **Snapshot compaction** — WAL auto-compacts after a configurable threshold, with optional zstd compression (`compression` feature)
 - **Two flush modes** — immediate fsync or grouped batching for throughput
 - **Zero-clone writes** — `Overlay` + `Transactable` captures changes without cloning state

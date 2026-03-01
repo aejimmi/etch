@@ -4,12 +4,16 @@
 //! block the async runtime. Reads are synchronous (sub-microsecond RwLock).
 //! Requires a multi-threaded tokio runtime.
 
+use std::path::PathBuf;
 use std::sync::Arc;
+
+use serde::de::DeserializeOwned;
+use serde::Serialize;
 
 use crate::backend::Backend;
 use crate::error::Result;
 use crate::store::{Ref, Store};
-use crate::wal::Transactable;
+use crate::wal::{Replayable, Transactable, WalBackend};
 
 /// Async-friendly wrapper around `Store`.
 ///
@@ -39,6 +43,18 @@ impl<T, B: Backend<T>> AsyncStore<T, B> {
     /// Access the underlying store reference.
     pub fn store(&self) -> &Store<T, B> {
         &self.inner
+    }
+}
+
+impl<T: Replayable + Serialize + DeserializeOwned + Default + Send + Sync + 'static>
+    AsyncStore<T, WalBackend<T>>
+{
+    /// Open a WAL-backed store for async use.
+    ///
+    /// Wraps `Store::open_wal` in `block_in_place` so it can be called from
+    /// an async context without blocking the runtime.
+    pub async fn open_wal(dir: PathBuf) -> Result<Self> {
+        tokio::task::block_in_place(move || Store::open_wal(dir).map(Self::from_store))
     }
 }
 

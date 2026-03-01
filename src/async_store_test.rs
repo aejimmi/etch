@@ -87,6 +87,25 @@ async fn async_read_write_roundtrip() {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn async_open_wal() {
+    let dir = tempfile::tempdir().unwrap();
+    let store = AsyncStore::<TestState, WalBackend<TestState>>::open_wal(dir.path().into())
+        .await
+        .unwrap();
+
+    store
+        .write(|tx| {
+            tx.insert("hello", "world");
+            Ok(())
+        })
+        .await
+        .unwrap();
+
+    let state = store.read();
+    assert_eq!(state.items.get("hello").unwrap(), "world");
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn async_write_durable() {
     let dir = tempfile::tempdir().unwrap();
     let inner = Store::<TestState, WalBackend<TestState>>::open_wal(dir.path().into()).unwrap();
