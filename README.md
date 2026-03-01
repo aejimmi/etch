@@ -33,6 +33,19 @@ If you have structured application state and you're using SQLite or Turso for wh
 - Single-process — no replication, no networking, no multi-process access
 - No schema migrations — you own your types, you own your versioning
 
+## Installation
+
+```sh
+cargo add etchdb
+```
+
+Or add to your `Cargo.toml`:
+
+```toml
+[dependencies]
+etchdb = "0.2"
+```
+
 ## Quick start
 
 ```rust
