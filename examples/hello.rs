@@ -4,7 +4,7 @@
 //!
 //! Run with: `cargo run --example hello`
 
-use etchdb::{Op, Overlay, Store, Transactable};
+use etchdb::{Op, Overlay, Store, Transactable, apply_overlay_btree};
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 
@@ -30,31 +30,31 @@ const ITEMS: u8 = 0;
 
 struct TodoTx<'a> {
     committed: &'a Todos,
-    items: Overlay<Todo>,
+    items: Overlay<String, Todo>,
     ops: Vec<Op>,
 }
 
 struct TodoOverlay {
-    items: Overlay<Todo>,
+    items: Overlay<String, Todo>,
 }
 
 impl<'a> TodoTx<'a> {
     fn insert(&mut self, id: &str, todo: Todo) {
         self.ops.push(Op::Put {
             collection: ITEMS,
-            key: id.to_string(),
+            key: id.as_bytes().to_vec(),
             value: postcard::to_allocvec(&todo).expect("serialize"),
         });
         self.items.put(id.to_string(), todo);
     }
 
     fn update(&mut self, id: &str, f: impl FnOnce(&mut Todo)) {
-        if let Some(t) = self.items.get(&self.committed.items, id) {
+        if let Some(t) = self.items.get(&self.committed.items, &id.to_string()) {
             let mut t = t.clone();
             f(&mut t);
             self.ops.push(Op::Put {
                 collection: ITEMS,
-                key: id.to_string(),
+                key: id.as_bytes().to_vec(),
                 value: postcard::to_allocvec(&t).expect("serialize"),
             });
             self.items.put(id.to_string(), t);
@@ -79,11 +79,11 @@ impl Transactable for Todos {
     }
 
     fn apply_overlay(&mut self, overlay: TodoOverlay) {
-        etch::apply_overlay_map(&mut self.items, overlay.items);
+        apply_overlay_btree(&mut self.items, overlay.items);
     }
 }
 
-fn main() -> etch::Result<()> {
+fn main() -> etchdb::Result<()> {
     let store = Store::<Todos>::memory();
 
     store.write(|tx| {

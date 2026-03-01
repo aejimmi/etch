@@ -3,7 +3,8 @@
 //! After a transaction commits, its overlay is applied to the in-memory
 //! state in O(changed keys) — no full-state clone needed.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, HashMap};
+use std::hash::Hash;
 
 use super::Op;
 use super::overlay::Overlay;
@@ -21,7 +22,20 @@ pub trait Transactable: Clone + Send + Sync + 'static {
 }
 
 /// Apply a transaction overlay to a committed BTreeMap.
-pub fn apply_overlay_map<V>(map: &mut BTreeMap<String, V>, overlay: Overlay<V>) {
+pub fn apply_overlay_btree<K: Ord + Clone, V>(map: &mut BTreeMap<K, V>, overlay: Overlay<K, V>) {
+    for key in overlay.deletes {
+        map.remove(&key);
+    }
+    for (key, value) in overlay.puts {
+        map.insert(key, value);
+    }
+}
+
+/// Apply a transaction overlay to a committed HashMap.
+pub fn apply_overlay_hash<K: Eq + Hash + Ord + Clone, V>(
+    map: &mut HashMap<K, V>,
+    overlay: Overlay<K, V>,
+) {
     for key in overlay.deletes {
         map.remove(&key);
     }

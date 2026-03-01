@@ -3,16 +3,66 @@
 //! Provides read-your-writes semantics on top of committed state.
 //! `get()` checks deletes → puts → committed, avoiding full-state clones.
 
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::{BTreeMap, BTreeSet, HashMap};
+use std::hash::Hash;
 
-/// A lightweight overlay that records puts and deletes against a committed
-/// `BTreeMap`. All reads see a merged view; writes only touch the overlay.
-pub struct Overlay<V> {
-    pub puts: BTreeMap<String, V>,
-    pub deletes: BTreeSet<String>,
+/// Trait abstracting read access to a committed collection.
+///
+/// Implemented for both `BTreeMap` and `HashMap`, allowing overlays to
+/// work with either backing store. Monomorphization means zero overhead.
+pub trait MapRead<K, V> {
+    fn get(&self, key: &K) -> Option<&V>;
+    fn contains_key(&self, key: &K) -> bool;
+    fn iter<'a>(&'a self) -> impl Iterator<Item = (&'a K, &'a V)>
+    where
+        K: 'a,
+        V: 'a;
 }
 
-impl<V> Default for Overlay<V> {
+impl<K: Ord, V> MapRead<K, V> for BTreeMap<K, V> {
+    fn get(&self, key: &K) -> Option<&V> {
+        BTreeMap::get(self, key)
+    }
+
+    fn contains_key(&self, key: &K) -> bool {
+        BTreeMap::contains_key(self, key)
+    }
+
+    fn iter<'a>(&'a self) -> impl Iterator<Item = (&'a K, &'a V)>
+    where
+        K: 'a,
+        V: 'a,
+    {
+        BTreeMap::iter(self)
+    }
+}
+
+impl<K: Eq + Hash, V> MapRead<K, V> for HashMap<K, V> {
+    fn get(&self, key: &K) -> Option<&V> {
+        HashMap::get(self, key)
+    }
+
+    fn contains_key(&self, key: &K) -> bool {
+        HashMap::contains_key(self, key)
+    }
+
+    fn iter<'a>(&'a self) -> impl Iterator<Item = (&'a K, &'a V)>
+    where
+        K: 'a,
+        V: 'a,
+    {
+        HashMap::iter(self)
+    }
+}
+
+/// A lightweight overlay that records puts and deletes against a committed
+/// map. All reads see a merged view; writes only touch the overlay.
+pub struct Overlay<K: Ord + Clone, V> {
+    pub puts: BTreeMap<K, V>,
+    pub deletes: BTreeSet<K>,
+}
+
+impl<K: Ord + Clone, V> Default for Overlay<K, V> {
     fn default() -> Self {
         Self {
             puts: BTreeMap::new(),
@@ -21,13 +71,13 @@ impl<V> Default for Overlay<V> {
     }
 }
 
-impl<V> Overlay<V> {
+impl<K: Ord + Clone, V> Overlay<K, V> {
     pub fn new() -> Self {
         Self::default()
     }
 
     /// Look up a key with read-your-writes: deletes → puts → committed.
-    pub fn get<'a>(&'a self, committed: &'a BTreeMap<String, V>, key: &str) -> Option<&'a V> {
+    pub fn get<'a>(&'a self, committed: &'a impl MapRead<K, V>, key: &K) -> Option<&'a V> {
         if self.deletes.contains(key) {
             return None;
         }
@@ -38,7 +88,7 @@ impl<V> Overlay<V> {
     }
 
     /// Check if a key exists in the merged view.
-    pub fn contains_key(&self, committed: &BTreeMap<String, V>, key: &str) -> bool {
+    pub fn contains_key(&self, committed: &impl MapRead<K, V>, key: &K) -> bool {
         if self.deletes.contains(key) {
             return false;
         }
@@ -48,7 +98,7 @@ impl<V> Overlay<V> {
     /// Iterate all values in the merged view.
     ///
     /// Yields committed values (minus deletes, minus overwritten) then overlay puts.
-    pub fn values<'a>(&'a self, committed: &'a BTreeMap<String, V>) -> impl Iterator<Item = &'a V> {
+    pub fn values<'a>(&'a self, committed: &'a impl MapRead<K, V>) -> impl Iterator<Item = &'a V> {
         let from_committed = committed.iter().filter_map(move |(k, v)| {
             if self.deletes.contains(k) || self.puts.contains_key(k) {
                 None
@@ -63,30 +113,30 @@ impl<V> Overlay<V> {
     /// Iterate all (key, value) pairs in the merged view.
     pub fn iter<'a>(
         &'a self,
-        committed: &'a BTreeMap<String, V>,
-    ) -> impl Iterator<Item = (&'a str, &'a V)> {
+        committed: &'a impl MapRead<K, V>,
+    ) -> impl Iterator<Item = (&'a K, &'a V)> {
         let from_committed = committed.iter().filter_map(move |(k, v)| {
             if self.deletes.contains(k) || self.puts.contains_key(k) {
                 None
             } else {
-                Some((k.as_str(), v))
+                Some((k, v))
             }
         });
-        let from_puts = self.puts.iter().map(|(k, v)| (k.as_str(), v));
+        let from_puts = self.puts.iter();
         from_committed.chain(from_puts)
     }
 
     /// Record a put (insert or update).
-    pub fn put(&mut self, key: String, value: V) {
+    pub fn put(&mut self, key: K, value: V) {
         self.deletes.remove(&key);
         self.puts.insert(key, value);
     }
 
     /// Record a delete. Returns true if the key existed in the merged view.
-    pub fn delete(&mut self, key: &str, committed: &BTreeMap<String, V>) -> bool {
+    pub fn delete(&mut self, key: &K, committed: &impl MapRead<K, V>) -> bool {
         let existed = self.puts.remove(key).is_some() || committed.contains_key(key);
         if committed.contains_key(key) {
-            self.deletes.insert(key.to_string());
+            self.deletes.insert(key.clone());
         }
         existed
     }
@@ -97,13 +147,13 @@ impl<V> Overlay<V> {
     /// non-matching entries as deleted and collecting their keys.
     pub fn retain(
         &mut self,
-        committed: &BTreeMap<String, V>,
-        mut f: impl FnMut(&str, &V) -> bool,
-    ) -> Vec<String> {
+        committed: &impl MapRead<K, V>,
+        mut f: impl FnMut(&K, &V) -> bool,
+    ) -> Vec<K> {
         let mut removed = Vec::new();
 
         // Scan committed entries not yet deleted or overwritten.
-        for (k, v) in committed {
+        for (k, v) in committed.iter() {
             if self.deletes.contains(k) || self.puts.contains_key(k) {
                 continue;
             }
@@ -114,7 +164,7 @@ impl<V> Overlay<V> {
         }
 
         // Scan overlay puts.
-        let to_remove: Vec<String> = self
+        let to_remove: Vec<K> = self
             .puts
             .iter()
             .filter(|(k, v)| !f(k, v))
@@ -122,8 +172,6 @@ impl<V> Overlay<V> {
             .collect();
         for k in to_remove {
             self.puts.remove(&k);
-            // If committed also has this key, add to deletes so it
-            // doesn't leak through after the overlay put is removed.
             if committed.contains_key(&k) {
                 self.deletes.insert(k.clone());
             }

@@ -1,0 +1,15 @@
+[package]
+name = "etchdb-derive"
+version = "0.3.0"
+edition = "2024"
+description = "Derive macros for etchdb"
+license = "MIT"
+repository = "https://github.com/tell-rs/etch"
+
+[lib]
+proc-macro = true
+
+[dependencies]
+proc-macro2 = "1"
+quote = "1"
+syn = { version = "2", features = ["full", "extra-traits"] }

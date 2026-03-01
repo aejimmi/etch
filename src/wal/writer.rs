@@ -15,9 +15,18 @@ use super::diff::Replayable;
 use super::format::WalFile;
 use super::op::Op;
 use crate::backend::Backend;
-use crate::error::Result;
+use crate::error::{Error, Result};
 
 const DEFAULT_SNAPSHOT_THRESHOLD: u64 = 1000;
+
+/// Snapshot format magic bytes.
+const SNAPSHOT_MAGIC: &[u8; 4] = b"ESNA";
+
+/// Snapshot version: raw postcard payload.
+const SNAPSHOT_VERSION_RAW: u8 = 1;
+
+/// Snapshot version: zstd-compressed postcard payload.
+const SNAPSHOT_VERSION_ZSTD: u8 = 2;
 
 /// WAL-based persistence backend.
 ///
@@ -77,7 +86,7 @@ impl<T: Replayable + Serialize + DeserializeOwned + Default> WalBackend<T> {
             if bytes.is_empty() {
                 T::default()
             } else {
-                postcard::from_bytes(&bytes)?
+                Self::decode_snapshot(&bytes)?
             }
         } else {
             T::default()
@@ -98,31 +107,84 @@ impl<T: Replayable + Serialize + DeserializeOwned + Default> WalBackend<T> {
             WalFile::truncate_at(&wal_path, valid_offset)?;
         }
 
+        state.after_load();
         Ok(state)
+    }
+
+    /// Decode a snapshot, detecting envelope version and optional compression.
+    fn decode_snapshot(bytes: &[u8]) -> Result<T> {
+        if bytes.len() >= 5 && &bytes[..4] == SNAPSHOT_MAGIC {
+            let version = bytes[4];
+            let payload = &bytes[5..];
+
+            match version {
+                SNAPSHOT_VERSION_RAW => Ok(postcard::from_bytes(payload)?),
+                SNAPSHOT_VERSION_ZSTD => {
+                    #[cfg(feature = "compression")]
+                    {
+                        let decompressed = zstd::decode_all(payload)?;
+                        Ok(postcard::from_bytes(&decompressed)?)
+                    }
+                    #[cfg(not(feature = "compression"))]
+                    {
+                        Err(Error::invalid(
+                            "snapshot",
+                            "snapshot was written with zstd compression; enable the `compression` feature to read it",
+                        ))
+                    }
+                }
+                _ => Err(Error::SnapshotVersion {
+                    version,
+                    expected: SNAPSHOT_VERSION_RAW,
+                }),
+            }
+        } else {
+            Err(Error::invalid(
+                "snapshot",
+                "missing snapshot envelope (ESNA magic header); file may be corrupted",
+            ))
+        }
     }
 
     /// Write a full snapshot and reset WAL.
     fn write_snapshot(&self, state: &T) -> Result<()> {
         let snap_path = self.snapshot_path();
         let tmp = snap_path.with_extension("tmp");
-        let bytes = postcard::to_allocvec(state)?;
+        let payload = postcard::to_allocvec(state)?;
 
         {
             let mut f = std::fs::File::create(&tmp)?;
-            f.write_all(&bytes)?;
+            f.write_all(SNAPSHOT_MAGIC)?;
+
+            #[cfg(feature = "compression")]
+            {
+                f.write_all(&[SNAPSHOT_VERSION_ZSTD])?;
+                let compressed = zstd::encode_all(&payload[..], 3)?;
+                f.write_all(&compressed)?;
+            }
+
+            #[cfg(not(feature = "compression"))]
+            {
+                f.write_all(&[SNAPSHOT_VERSION_RAW])?;
+                f.write_all(&payload)?;
+            }
+
             f.sync_all()?;
         }
 
         std::fs::rename(&tmp, &snap_path)?;
 
-        // Fsync directory.
-        if let Ok(dir) = std::fs::File::open(&self.dir) {
-            let _ = dir.sync_all();
-        }
-
-        // Reset WAL.
+        // Reset WAL before directory fsync so one fsync covers both
+        // the snapshot rename and WAL truncation.
         self.wal.lock().reset()?;
         self.entry_count.store(0, Ordering::Release);
+
+        // Fsync directory to ensure rename and WAL reset are durable.
+        #[cfg(unix)]
+        {
+            let dir = std::fs::File::open(&self.dir)?;
+            dir.sync_all()?;
+        }
 
         Ok(())
     }

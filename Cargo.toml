@@ -1,18 +1,26 @@
 [package]
 name = "etchdb"
-version = "0.2.2"
+version = "0.3.0"
 edition = "2024"
-description = "A fast, embedded database for Rust. 5 dependencies. No C code. No build scripts."
+description = "A fast, embedded database for Rust. Minimal dependencies. No C code. No build scripts."
 license = "MIT"
 repository = "https://github.com/tell-rs/etch"
 authors = ["Tell Contributors"]
 
+[features]
+default = []
+async = ["tokio"]
+compression = ["zstd"]
+
 [dependencies]
+etchdb-derive = { path = "derive", version = "0.3.0" }
 xxhash-rust = { version = "0.8", features = ["xxh3"] }
 parking_lot = "0.12"
 postcard = { version = "1", features = ["alloc"] }
 serde = { version = "1", features = ["derive"] }
 thiserror = "2"
+tokio = { version = "1", features = ["rt-multi-thread", "macros"], optional = true }
+zstd = { version = "0.13", optional = true }
 
 [dev-dependencies]
 tempfile = "3"

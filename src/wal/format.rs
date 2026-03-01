@@ -13,7 +13,7 @@ use super::op::Op;
 use crate::error::{Error, Result};
 
 const MAGIC: &[u8; 4] = b"EWAL";
-const VERSION: u8 = 2;
+const VERSION: u8 = 3;
 const HEADER_SIZE: u64 = 16;
 
 /// WAL file writer — wraps a BufWriter for appends, raw File for reads.

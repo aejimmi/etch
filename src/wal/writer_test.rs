@@ -25,7 +25,7 @@ impl Replayable for State {
 fn put_op(key: &str, value: &str) -> Op {
     Op::Put {
         collection: 0,
-        key: key.to_string(),
+        key: key.as_bytes().to_vec(),
         value: postcard::to_allocvec(&value.to_string()).unwrap(),
     }
 }
@@ -33,7 +33,7 @@ fn put_op(key: &str, value: &str) -> Op {
 fn del_op(key: &str) -> Op {
     Op::Delete {
         collection: 0,
-        key: key.to_string(),
+        key: key.as_bytes().to_vec(),
     }
 }
 
@@ -330,7 +330,6 @@ fn load_truncates_corrupt_wal_tail() {
     let backend = WalBackend::<State>::open(dir.path()).unwrap();
     let state = backend.load().unwrap();
     assert_eq!(state.items.get("a").unwrap(), "1");
-    // Second entry was corrupt — should be gone.
     assert!(!state.items.contains_key("b"));
 
     // WAL file should have been truncated.
@@ -338,4 +337,199 @@ fn load_truncates_corrupt_wal_tail() {
     let (entries, valid_offset) = super::format::WalFile::iter_entries(&wal_path).unwrap();
     assert_eq!(entries.len(), 1);
     assert_eq!(file_len, valid_offset);
+}
+
+// -------------------------------------------------------------------------
+// Snapshot envelope format
+// -------------------------------------------------------------------------
+
+#[test]
+fn snapshot_has_magic_and_version() {
+    let dir = tempfile::tempdir().unwrap();
+    let backend = WalBackend::<State>::open(dir.path()).unwrap();
+
+    let mut state = State::default();
+    state.items.insert("a".into(), "alpha".into());
+    backend.save(&state).unwrap();
+
+    let bytes = std::fs::read(dir.path().join("snapshot.postcard")).unwrap();
+    assert!(bytes.len() >= 5, "snapshot too short");
+    assert_eq!(&bytes[..4], b"ESNA", "missing snapshot magic");
+
+    #[cfg(feature = "compression")]
+    assert_eq!(bytes[4], 2, "expected zstd snapshot version");
+    #[cfg(not(feature = "compression"))]
+    assert_eq!(bytes[4], 1, "expected raw snapshot version");
+}
+
+#[test]
+fn snapshot_roundtrip_with_envelope() {
+    let dir = tempfile::tempdir().unwrap();
+    let backend = WalBackend::<State>::open(dir.path()).unwrap();
+
+    let mut state = State::default();
+    state.items.insert("x".into(), "10".into());
+    state.items.insert("y".into(), "20".into());
+    backend.save(&state).unwrap();
+
+    let backend2 = WalBackend::<State>::open(dir.path()).unwrap();
+    let loaded = backend2.load().unwrap();
+    assert_eq!(loaded, state);
+}
+
+#[test]
+fn snapshot_version_mismatch_returns_error() {
+    let dir = tempfile::tempdir().unwrap();
+
+    // Write a snapshot with version 99.
+    let state = State::default();
+    let payload = postcard::to_allocvec(&state).unwrap();
+    let mut bytes = Vec::new();
+    bytes.extend_from_slice(b"ESNA");
+    bytes.push(99); // bad version
+    bytes.extend_from_slice(&payload);
+
+    std::fs::create_dir_all(dir.path()).unwrap();
+    std::fs::write(dir.path().join("snapshot.postcard"), &bytes).unwrap();
+
+    let backend = WalBackend::<State>::open(dir.path()).unwrap();
+    let result = backend.load();
+    assert!(result.is_err());
+    let err = result.unwrap_err();
+    assert!(
+        err.to_string().contains("snapshot version mismatch"),
+        "expected version mismatch error, got: {err}"
+    );
+}
+
+/// A zstd-compressed snapshot (version 2) without the compression feature returns an error.
+#[cfg(not(feature = "compression"))]
+#[test]
+fn zstd_snapshot_without_feature_returns_error() {
+    let dir = tempfile::tempdir().unwrap();
+
+    // Manually write a snapshot with version 2 (zstd).
+    let state = State::default();
+    let payload = postcard::to_allocvec(&state).unwrap();
+    let mut bytes = Vec::new();
+    bytes.extend_from_slice(b"ESNA");
+    bytes.push(2); // zstd version
+    bytes.extend_from_slice(&payload); // not actually compressed, but we hit the version check first
+
+    std::fs::create_dir_all(dir.path()).unwrap();
+    std::fs::write(dir.path().join("snapshot.postcard"), &bytes).unwrap();
+
+    let backend = WalBackend::<State>::open(dir.path()).unwrap();
+    let result = backend.load();
+    assert!(result.is_err());
+    let err = result.unwrap_err();
+    assert!(
+        err.to_string().contains("enable the `compression` feature"),
+        "expected compression feature error, got: {err}"
+    );
+}
+
+/// Raw v1 snapshots are always readable regardless of compression feature.
+#[test]
+fn raw_v1_snapshot_readable_with_any_feature() {
+    let dir = tempfile::tempdir().unwrap();
+
+    let mut state = State::default();
+    state.items.insert("raw".into(), "value".into());
+    let payload = postcard::to_allocvec(&state).unwrap();
+
+    let mut bytes = Vec::new();
+    bytes.extend_from_slice(b"ESNA");
+    bytes.push(1); // v1 raw
+    bytes.extend_from_slice(&payload);
+
+    std::fs::create_dir_all(dir.path()).unwrap();
+    std::fs::write(dir.path().join("snapshot.postcard"), &bytes).unwrap();
+
+    let backend = WalBackend::<State>::open(dir.path()).unwrap();
+    let loaded = backend.load().unwrap();
+    assert_eq!(loaded.items.get("raw").unwrap(), "value");
+}
+
+/// Snapshot file without ESNA magic header returns error.
+#[test]
+fn snapshot_missing_envelope_returns_error() {
+    let dir = tempfile::tempdir().unwrap();
+
+    // Write raw postcard bytes (no ESNA header) as snapshot.
+    let state = State::default();
+    let raw = postcard::to_allocvec(&state).unwrap();
+    std::fs::create_dir_all(dir.path()).unwrap();
+    std::fs::write(dir.path().join("snapshot.postcard"), &raw).unwrap();
+
+    let backend = WalBackend::<State>::open(dir.path()).unwrap();
+    let result = backend.load();
+    assert!(result.is_err());
+    let err = result.unwrap_err();
+    assert!(
+        err.to_string().contains("missing snapshot envelope"),
+        "expected envelope error, got: {err}"
+    );
+}
+
+/// When compression is enabled, snapshot write+read roundtrips through zstd.
+#[cfg(feature = "compression")]
+#[test]
+fn compressed_snapshot_roundtrip() {
+    let dir = tempfile::tempdir().unwrap();
+    let backend = WalBackend::<State>::open(dir.path()).unwrap();
+
+    let mut state = State::default();
+    for i in 0..100 {
+        state.items.insert(format!("key_{i}"), format!("value_{i}"));
+    }
+    backend.save(&state).unwrap();
+
+    // Verify it wrote version 2.
+    let bytes = std::fs::read(dir.path().join("snapshot.postcard")).unwrap();
+    assert_eq!(bytes[4], 2);
+
+    // Verify roundtrip.
+    let backend2 = WalBackend::<State>::open(dir.path()).unwrap();
+    let loaded = backend2.load().unwrap();
+    assert_eq!(loaded, state);
+}
+
+/// Compressed snapshots should be smaller than raw for repetitive data.
+#[cfg(feature = "compression")]
+#[test]
+fn compressed_snapshot_is_smaller() {
+    let dir_raw = tempfile::tempdir().unwrap();
+    let dir_compressed = tempfile::tempdir().unwrap();
+
+    let mut state = State::default();
+    for i in 0..500 {
+        state
+            .items
+            .insert(format!("document_{i}"), format!("content_value_{i}"));
+    }
+
+    // Write raw v1 snapshot manually.
+    let payload = postcard::to_allocvec(&state).unwrap();
+    let mut raw_bytes = Vec::new();
+    raw_bytes.extend_from_slice(b"ESNA");
+    raw_bytes.push(1);
+    raw_bytes.extend_from_slice(&payload);
+    std::fs::write(dir_raw.path().join("snapshot.postcard"), &raw_bytes).unwrap();
+
+    // Write compressed snapshot via backend.
+    let backend = WalBackend::<State>::open(dir_compressed.path()).unwrap();
+    backend.save(&state).unwrap();
+
+    let raw_size = std::fs::metadata(dir_raw.path().join("snapshot.postcard"))
+        .unwrap()
+        .len();
+    let compressed_size = std::fs::metadata(dir_compressed.path().join("snapshot.postcard"))
+        .unwrap()
+        .len();
+
+    assert!(
+        compressed_size < raw_size,
+        "compressed ({compressed_size}) should be smaller than raw ({raw_size})"
+    );
 }

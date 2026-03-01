@@ -15,7 +15,7 @@
 //! # Quick start
 //!
 //! ```rust
-//! use etchdb::{Store, Replayable, Op, Overlay, Transactable};
+//! use etchdb::{Store, Replayable, Op, Overlay, Transactable, apply_overlay_btree};
 //! use serde::{Serialize, Deserialize};
 //! use std::collections::BTreeMap;
 //!
@@ -30,15 +30,15 @@
 //! const ITEMS: u8 = 0;
 //!
 //! impl Replayable for AppState {
-//!     fn apply(&mut self, ops: &[Op]) -> etch::Result<()> {
-//!         for op in ops { etch::apply_op(&mut self.items, op)?; }
+//!     fn apply(&mut self, ops: &[Op]) -> etchdb::Result<()> {
+//!         for op in ops { etchdb::apply_op(&mut self.items, op)?; }
 //!         Ok(())
 //!     }
 //! }
 //!
 //! struct AppTx<'a> {
 //!     committed: &'a AppState,
-//!     items: Overlay<Item>,
+//!     items: Overlay<String, Item>,
 //!     ops: Vec<Op>,
 //! }
 //!
@@ -46,14 +46,14 @@
 //!     fn insert(&mut self, key: &str, item: Item) {
 //!         self.ops.push(Op::Put {
 //!             collection: ITEMS,
-//!             key: key.to_string(),
+//!             key: key.as_bytes().to_vec(),
 //!             value: postcard::to_allocvec(&item).expect("serialize"),
 //!         });
 //!         self.items.put(key.to_string(), item);
 //!     }
 //! }
 //!
-//! struct AppOverlay { items: Overlay<Item> }
+//! struct AppOverlay { items: Overlay<String, Item> }
 //!
 //! impl Transactable for AppState {
 //!     type Tx<'a> = AppTx<'a>;
@@ -65,7 +65,7 @@
 //!         (tx.ops, AppOverlay { items: tx.items })
 //!     }
 //!     fn apply_overlay(&mut self, overlay: AppOverlay) {
-//!         etch::apply_overlay_map(&mut self.items, overlay.items);
+//!         etchdb::apply_overlay_btree(&mut self.items, overlay.items);
 //!     }
 //! }
 //!
@@ -80,18 +80,38 @@
 //! assert_eq!(state.items["k1"].name, "first");
 //! ```
 
+// Allow the crate to refer to itself as `etchdb` in generated code from derive macros.
+extern crate self as etchdb;
+
+#[cfg(feature = "async")]
+pub mod async_store;
 pub mod backend;
 pub mod error;
 pub mod store;
 pub mod wal;
 
+#[cfg(feature = "async")]
+pub use async_store::AsyncStore;
 pub use backend::{Backend, NullBackend};
 pub use error::{Error, Result};
+/// Re-export derive macros so users can `use etchdb::{Replayable, Transactable}` for both
+/// the trait and the derive macro (same pattern as serde).
+pub use etchdb_derive::{Replayable, Transactable};
 pub use store::{FlushPolicy, Ref, Store};
 pub use wal::{
-    IncrementalSave, Op, Overlay, Replayable, Transactable, WalBackend, apply_op, apply_overlay_map,
+    Collection, EtchKey, IncrementalSave, MapRead, Op, Overlay, Replayable, Transactable,
+    WalBackend, apply_op, apply_op_bytes, apply_op_hash, apply_op_hash_bytes, apply_op_hash_with,
+    apply_op_with, apply_overlay_btree, apply_overlay_hash,
 };
 
 #[cfg(test)]
 #[path = "error_test.rs"]
 mod error_test;
+
+#[cfg(all(test, feature = "async"))]
+#[path = "async_store_test.rs"]
+mod async_store_test;
+
+#[cfg(test)]
+#[path = "derive_test.rs"]
+mod derive_test;

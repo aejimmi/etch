@@ -9,7 +9,7 @@ use crate::backend::{Backend, NullBackend};
 use crate::error::Error;
 use crate::store::{FlushPolicy, Store};
 use crate::wal::{
-    IncrementalSave, Op, Overlay, Replayable, Transactable, WalBackend, apply_overlay_map,
+    IncrementalSave, Op, Overlay, Replayable, Transactable, WalBackend, apply_overlay_btree,
 };
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq)]
@@ -33,19 +33,19 @@ impl Replayable for TestState {
 
 struct TestTx<'a> {
     committed: &'a TestState,
-    items: Overlay<String>,
+    items: Overlay<String, String>,
     ops: Vec<Op>,
 }
 
 struct TestOverlay {
-    items: Overlay<String>,
+    items: Overlay<String, String>,
 }
 
 impl<'a> TestTx<'a> {
     fn insert(&mut self, key: &str, value: &str) {
         self.ops.push(Op::Put {
             collection: 0,
-            key: key.to_string(),
+            key: key.as_bytes().to_vec(),
             value: postcard::to_allocvec(&value.to_string()).unwrap(),
         });
         self.items.put(key.to_string(), value.to_string());
@@ -53,7 +53,7 @@ impl<'a> TestTx<'a> {
 
     #[allow(dead_code)]
     fn get(&self, key: &str) -> Option<&String> {
-        self.items.get(&self.committed.items, key)
+        self.items.get(&self.committed.items, &key.to_string())
     }
 }
 
@@ -74,7 +74,7 @@ impl Transactable for TestState {
     }
 
     fn apply_overlay(&mut self, overlay: TestOverlay) {
-        apply_overlay_map(&mut self.items, overlay.items);
+        apply_overlay_btree(&mut self.items, overlay.items);
     }
 }
 
@@ -206,7 +206,6 @@ fn grouped_store(interval: Duration) -> (Store<TestState, CountingBackend>, Arc<
 fn group_commit_coalesces_writes() {
     let (store, inner) = grouped_store(Duration::from_millis(200));
 
-    // Rapid-fire 100 writes — should coalesce into very few fsyncs.
     for i in 0..100 {
         store
             .write(|tx| {
@@ -216,15 +215,11 @@ fn group_commit_coalesces_writes() {
             .unwrap();
     }
 
-    // Wait for the flusher to persist.
     std::thread::sleep(Duration::from_millis(400));
 
     let saves = inner.save_count.load(Ordering::Acquire);
-    // With a mock backend (no real fsync), saves happen faster, but still
-    // far fewer than 100. Real backends with 6-8ms fsync coalesce much harder.
     assert!(saves < 50, "expected coalesced saves (<50), got {saves}");
 
-    // Verify final state is complete.
     let state = inner.state.lock().clone();
     assert_eq!(state.items.len(), 100);
     assert_eq!(state.items.get("k99").unwrap(), "v99");
@@ -234,7 +229,6 @@ fn group_commit_coalesces_writes() {
 fn write_durable_bypasses_grouping() {
     let (store, inner) = grouped_store(Duration::from_secs(10));
 
-    // write_durable should persist immediately, even with long interval.
     store
         .write_durable(|tx| {
             tx.insert("critical", "yes");
@@ -261,7 +255,6 @@ fn group_commit_error_propagation() {
         interval: Duration::from_millis(50),
     });
 
-    // First write succeeds in-memory.
     store
         .write(|tx| {
             tx.insert("a", "1");
@@ -269,20 +262,16 @@ fn group_commit_error_propagation() {
         })
         .unwrap();
 
-    // Inject an error into the backend.
     *inner.fail_next.lock() = Some(Error::Io(std::io::Error::other("disk full")));
 
-    // Wait for flusher to hit the error.
     std::thread::sleep(Duration::from_millis(500));
 
-    // Next write should return the flusher's error.
     let result = store.write(|tx| {
         tx.insert("b", "2");
         Ok(())
     });
     assert!(result.is_err(), "write should propagate flusher error");
 
-    // Subsequent write should succeed (error was consumed).
     store
         .write(|tx| {
             tx.insert("c", "3");
@@ -300,7 +289,6 @@ fn group_commit_clean_shutdown() {
         interval: Duration::from_secs(5),
     });
 
-    // Write but don't wait for flush.
     store
         .write(|tx| {
             tx.insert("k", "v");
@@ -308,7 +296,6 @@ fn group_commit_clean_shutdown() {
         })
         .unwrap();
 
-    // Drop triggers shutdown + final flush.
     drop(store);
 
     let state = inner.state.lock().clone();
@@ -330,7 +317,6 @@ fn flush_forces_immediate_persist() {
         })
         .unwrap();
 
-    // flush() should persist immediately.
     store.flush().unwrap();
 
     let state = inner.state.lock().clone();
@@ -371,7 +357,6 @@ fn flush_error_returns_latest() {
 fn group_commit_file_backed_persists() {
     let dir = TempDir::new().unwrap();
 
-    // Write with grouped policy, then drop.
     {
         let mut store: WalStore = Store::open_wal(dir.path().to_path_buf()).unwrap();
         store.set_flush_policy(FlushPolicy::Grouped {
@@ -386,9 +371,8 @@ fn group_commit_file_backed_persists() {
                 })
                 .unwrap();
         }
-    } // drop flushes
+    }
 
-    // Re-open and verify everything persisted.
     {
         let store: WalStore = Store::open_wal(dir.path().to_path_buf()).unwrap();
         let state = store.read();
@@ -421,7 +405,6 @@ fn group_commit_concurrent_writers() {
         h.join().unwrap();
     }
 
-    // Flush to ensure everything persisted.
     store.flush().unwrap();
 
     let state = inner.state.lock().clone();
@@ -439,7 +422,6 @@ fn group_commit_mixed_write_and_durable() {
     let store = Arc::new(store);
     let mut handles = Vec::new();
 
-    // Regular writers.
     for t in 0..10 {
         let s = Arc::clone(&store);
         handles.push(std::thread::spawn(move || {
@@ -453,7 +435,6 @@ fn group_commit_mixed_write_and_durable() {
         }));
     }
 
-    // Durable writers.
     for t in 0..5 {
         let s = Arc::clone(&store);
         handles.push(std::thread::spawn(move || {
@@ -474,7 +455,7 @@ fn group_commit_mixed_write_and_durable() {
     store.flush().unwrap();
 
     let state = inner.state.lock().clone();
-    let expected = 10 * 20 + 5 * 10; // 250
+    let expected = 10 * 20 + 5 * 10;
     assert_eq!(state.items.len(), expected);
 }
 
@@ -497,7 +478,6 @@ fn wal_store_write_close_reopen() {
             .unwrap();
     }
 
-    // Reopen and verify state survived.
     {
         let store: WalStore = Store::open_wal(dir.path().to_path_buf()).unwrap();
         let state = store.read();
@@ -586,12 +566,11 @@ fn wal_store_open_empty_dir() {
 fn wal_store_backend_accessible() {
     let dir = TempDir::new().unwrap();
     let store: WalStore = Store::open_wal(dir.path().to_path_buf()).unwrap();
-    // Verify backend() returns a reference.
     let _backend = store.backend();
 }
 
 // =========================================================================
-// WAL store + grouped flush (covers WAL flusher_loop + grouped write paths)
+// WAL store + grouped flush
 // =========================================================================
 
 #[test]
@@ -613,12 +592,10 @@ fn wal_store_grouped_write_persists() {
                 .unwrap();
         }
 
-        // Wait for the grouped flusher to run and persist WAL ops.
         std::thread::sleep(Duration::from_millis(200));
         store.flush().unwrap();
     }
 
-    // Reopen and verify.
     let store: WalStore = Store::open_wal(dir.path().to_path_buf()).unwrap();
     let state = store.read();
     assert_eq!(state.items.len(), 10);
@@ -627,8 +604,6 @@ fn wal_store_grouped_write_persists() {
 
 #[test]
 fn wal_store_grouped_flusher_processes_ops() {
-    // Ensure the flusher loop WAL branch actually fires by writing,
-    // then waiting for the flusher interval to elapse.
     let dir = TempDir::new().unwrap();
 
     let mut store: WalStore = Store::open_wal(dir.path().to_path_buf()).unwrap();
@@ -643,13 +618,10 @@ fn wal_store_grouped_flusher_processes_ops() {
         })
         .unwrap();
 
-    // Let the flusher tick and process the pending ops.
     std::thread::sleep(Duration::from_millis(100));
 
-    // Verify data is readable (flusher synced the WAL).
     assert_eq!(store.read().items.get("a").unwrap(), "1");
 
-    // flush should be a no-op now (already flushed).
     store.flush().unwrap();
 }
 
@@ -660,10 +632,9 @@ fn wal_store_grouped_write_durable_drains_pending() {
     {
         let mut store: WalStore = Store::open_wal(dir.path().to_path_buf()).unwrap();
         store.set_flush_policy(FlushPolicy::Grouped {
-            interval: Duration::from_secs(10), // long interval — won't auto-flush
+            interval: Duration::from_secs(10),
         });
 
-        // Buffer some writes (grouped, not flushed yet).
         store
             .write(|tx| {
                 tx.insert("buffered", "yes");
@@ -671,7 +642,6 @@ fn wal_store_grouped_write_durable_drains_pending() {
             })
             .unwrap();
 
-        // write_durable should drain pending + fsync immediately.
         store
             .write_durable(|tx| {
                 tx.insert("durable", "yes");
@@ -708,7 +678,6 @@ fn wal_store_grouped_flush_persists_across_reopen() {
         store.flush().unwrap();
     }
 
-    // Reopen and verify everything survived.
     let store: WalStore = Store::open_wal(dir.path().to_path_buf()).unwrap();
     let state = store.read();
     assert_eq!(state.items.len(), 20);
@@ -725,7 +694,6 @@ fn set_flush_policy_to_immediate() {
         })
         .unwrap();
 
-    // Switch back to immediate mode.
     store.set_flush_policy(FlushPolicy::Immediate);
 
     store
@@ -741,7 +709,6 @@ fn set_flush_policy_to_immediate() {
 #[test]
 fn flush_noop_in_immediate_mode() {
     let store = Store::<TestState>::memory();
-    // flush() on an immediate-mode store should be a no-op.
     store.flush().unwrap();
 }
 
@@ -757,7 +724,6 @@ fn flush_noop_when_already_flushed() {
         .unwrap();
 
     store.flush().unwrap();
-    // Second flush — already caught up, should return immediately.
     store.flush().unwrap();
 }
 
@@ -789,7 +755,6 @@ fn close_shuts_down_flusher() {
 
 #[test]
 fn wal_store_grouped_empty_write_noop() {
-    // Exercises the WAL grouped path where ops is empty (line 219).
     let dir = TempDir::new().unwrap();
 
     let mut store: WalStore = Store::open_wal(dir.path().to_path_buf()).unwrap();
@@ -797,13 +762,7 @@ fn wal_store_grouped_empty_write_noop() {
         interval: Duration::from_millis(50),
     });
 
-    // A write that produces no ops (no mutations in the tx).
-    store
-        .write(|_tx| {
-            // No inserts — empty ops vec.
-            Ok(())
-        })
-        .unwrap();
+    store.write(|_tx| Ok(())).unwrap();
 
     store.flush().unwrap();
     assert!(store.read().items.is_empty());
@@ -811,17 +770,11 @@ fn wal_store_grouped_empty_write_noop() {
 
 #[test]
 fn wal_store_write_durable_empty_ops() {
-    // Exercises the WAL write_durable path where ops is empty (line 275).
     let dir = TempDir::new().unwrap();
 
     let store: WalStore = Store::open_wal(dir.path().to_path_buf()).unwrap();
 
-    store
-        .write_durable(|_tx| {
-            // No mutations — empty ops.
-            Ok(())
-        })
-        .unwrap();
+    store.write_durable(|_tx| Ok(())).unwrap();
 
     assert!(store.read().items.is_empty());
 }
@@ -846,7 +799,6 @@ fn wal_store_grouped_close_flushes() {
         store.close().unwrap();
     }
 
-    // Data should have been flushed on close.
     let store: WalStore = Store::open_wal(dir.path().to_path_buf()).unwrap();
     assert_eq!(store.read().items.get("k").unwrap(), "v");
 }
@@ -905,7 +857,6 @@ impl IncrementalSave<TestState> for MockIncremental {
 }
 
 /// Helper: build a grouped store with a mock IncrementalSave.
-/// Since store_test is a child module of store, we can access private fields.
 fn mock_wal_store(
     threshold: u64,
     interval: Duration,
@@ -927,12 +878,11 @@ fn mock_wal_store(
 }
 
 // =========================================================================
-// Flusher WAL branch tests (store.rs lines 421-448)
+// Flusher WAL branch tests
 // =========================================================================
 
 #[test]
 fn flusher_wal_triggers_snapshot() {
-    // Covers flusher_loop WAL snapshot compaction (lines 440-441).
     let (store, mock) = mock_wal_store(3, Duration::from_millis(30));
 
     for i in 0..5 {
@@ -944,7 +894,6 @@ fn flusher_wal_triggers_snapshot() {
             .unwrap();
     }
 
-    // Wait for flusher to process ops and trigger snapshot.
     std::thread::sleep(Duration::from_millis(200));
     store.flush().unwrap();
 
@@ -956,13 +905,10 @@ fn flusher_wal_triggers_snapshot() {
 
 #[test]
 fn flusher_wal_save_ops_error_propagates() {
-    // Covers flusher_loop WAL save_ops error (lines 430-431, 435).
     let (store, mock) = mock_wal_store(1000, Duration::from_millis(30));
 
-    // Set up failure before writes.
     mock.fail_save_ops.store(true, Ordering::Release);
 
-    // write() just buffers ops — doesn't call save_ops directly.
     store
         .write(|tx| {
             tx.insert("a", "1");
@@ -970,10 +916,8 @@ fn flusher_wal_save_ops_error_propagates() {
         })
         .unwrap();
 
-    // Wait for flusher to attempt save_ops and fail.
     std::thread::sleep(Duration::from_millis(200));
 
-    // Next write should see the propagated error.
     let result = store.write(|tx| {
         tx.insert("b", "2");
         Ok(())
@@ -986,7 +930,6 @@ fn flusher_wal_save_ops_error_propagates() {
 
 #[test]
 fn flusher_wal_sync_error_propagates() {
-    // Covers flusher_loop WAL sync error (line 446).
     let (store, mock) = mock_wal_store(1000, Duration::from_millis(30));
 
     mock.fail_sync.store(true, Ordering::Release);
@@ -1009,7 +952,6 @@ fn flusher_wal_sync_error_propagates() {
 
 #[test]
 fn flush_discovers_flusher_wal_error() {
-    // Covers flush() error-during-wait path (line 372).
     let (store, mock) = mock_wal_store(1000, Duration::from_millis(30));
 
     mock.fail_sync.store(true, Ordering::Release);
@@ -1021,9 +963,32 @@ fn flush_discovers_flusher_wal_error() {
         })
         .unwrap();
 
-    // flush() should loop, discover the flusher error, and return it.
     let result = store.flush();
     assert!(result.is_err(), "flush should return flusher error");
+}
+
+// =========================================================================
+// Flush post-loop error detection
+// =========================================================================
+
+/// After a successful flush, flush_error() is None and a second flush()
+/// is a no-op (gen already caught up).
+#[test]
+fn flush_no_error_after_success() {
+    let (store, _mock) = mock_wal_store(1000, Duration::from_millis(30));
+
+    store
+        .write(|tx| {
+            tx.insert("a", "1");
+            Ok(())
+        })
+        .unwrap();
+
+    store.flush().unwrap();
+    assert!(store.flush_error().is_none());
+
+    // Second flush is a no-op since gen is already caught up.
+    store.flush().unwrap();
 }
 
 // =========================================================================
@@ -1032,7 +997,6 @@ fn flush_discovers_flusher_wal_error() {
 
 #[test]
 fn null_backend_load_via_with_backend() {
-    // Covers NullBackend::load (backend.rs lines 94-96).
     let store: Store<TestState, NullBackend> = Store::with_backend(NullBackend).unwrap();
     assert!(store.read().items.is_empty());
 }

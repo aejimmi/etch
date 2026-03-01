@@ -25,6 +25,9 @@ pub enum Error {
 
     #[error("WAL corrupted at offset {offset}: {reason}")]
     WalCorrupted { offset: u64, reason: String },
+
+    #[error("snapshot version mismatch: got {version}, expected {expected}")]
+    SnapshotVersion { version: u8, expected: u8 },
 }
 
 impl Error {

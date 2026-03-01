@@ -5,7 +5,7 @@
 //!
 //! Run with: `cargo run --example contacts`
 
-use etchdb::{Op, Overlay, Replayable, Store, Transactable, WalBackend};
+use etchdb::{Op, Overlay, Replayable, Store, Transactable, WalBackend, apply_overlay_btree};
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 use std::path::PathBuf;
@@ -31,9 +31,9 @@ const PEOPLE: u8 = 0;
 // One line per collection: route ops to the right BTreeMap.
 
 impl Replayable for ContactBook {
-    fn apply(&mut self, ops: &[Op]) -> etch::Result<()> {
+    fn apply(&mut self, ops: &[Op]) -> etchdb::Result<()> {
         for op in ops {
-            etch::apply_op(&mut self.people, op)?;
+            etchdb::apply_op(&mut self.people, op)?;
         }
         Ok(())
     }
@@ -44,31 +44,31 @@ impl Replayable for ContactBook {
 
 struct ContactTx<'a> {
     committed: &'a ContactBook,
-    people: Overlay<Person>,
+    people: Overlay<String, Person>,
     ops: Vec<Op>,
 }
 
 struct ContactOverlay {
-    people: Overlay<Person>,
+    people: Overlay<String, Person>,
 }
 
 impl<'a> ContactTx<'a> {
     fn insert(&mut self, id: &str, person: Person) {
         self.ops.push(Op::Put {
             collection: PEOPLE,
-            key: id.to_string(),
+            key: id.as_bytes().to_vec(),
             value: postcard::to_allocvec(&person).expect("serialize"),
         });
         self.people.put(id.to_string(), person);
     }
 
     fn update(&mut self, id: &str, f: impl FnOnce(&mut Person)) {
-        if let Some(p) = self.people.get(&self.committed.people, id) {
+        if let Some(p) = self.people.get(&self.committed.people, &id.to_string()) {
             let mut p = p.clone();
             f(&mut p);
             self.ops.push(Op::Put {
                 collection: PEOPLE,
-                key: id.to_string(),
+                key: id.as_bytes().to_vec(),
                 value: postcard::to_allocvec(&p).expect("serialize"),
             });
             self.people.put(id.to_string(), p);
@@ -78,9 +78,9 @@ impl<'a> ContactTx<'a> {
     fn delete(&mut self, id: &str) {
         self.ops.push(Op::Delete {
             collection: PEOPLE,
-            key: id.to_string(),
+            key: id.as_bytes().to_vec(),
         });
-        self.people.delete(id, &self.committed.people);
+        self.people.delete(&id.to_string(), &self.committed.people);
     }
 }
 
@@ -101,11 +101,11 @@ impl Transactable for ContactBook {
     }
 
     fn apply_overlay(&mut self, overlay: ContactOverlay) {
-        etch::apply_overlay_map(&mut self.people, overlay.people);
+        apply_overlay_btree(&mut self.people, overlay.people);
     }
 }
 
-fn main() -> etch::Result<()> {
+fn main() -> etchdb::Result<()> {
     let dir = PathBuf::from("data/contacts");
     std::fs::create_dir_all(&dir)?;
 

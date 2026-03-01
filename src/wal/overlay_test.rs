@@ -1,4 +1,4 @@
-//! Tests for Overlay<V>.
+//! Tests for Overlay<K, V>.
 
 use std::collections::BTreeMap;
 
@@ -15,9 +15,9 @@ fn committed() -> BTreeMap<String, String> {
 #[test]
 fn get_falls_through_to_committed() {
     let c = committed();
-    let ov = Overlay::<String>::new();
-    assert_eq!(ov.get(&c, "a").unwrap(), "alpha");
-    assert!(ov.get(&c, "z").is_none());
+    let ov = Overlay::<String, String>::new();
+    assert_eq!(ov.get(&c, &"a".into()).unwrap(), "alpha");
+    assert!(ov.get(&c, &"z".into()).is_none());
 }
 
 #[test]
@@ -25,15 +25,15 @@ fn get_returns_overlay_put() {
     let c = committed();
     let mut ov = Overlay::new();
     ov.put("a".into(), "ALPHA".into());
-    assert_eq!(ov.get(&c, "a").unwrap(), "ALPHA");
+    assert_eq!(ov.get(&c, &"a".into()).unwrap(), "ALPHA");
 }
 
 #[test]
 fn get_returns_none_for_deleted() {
     let c = committed();
-    let mut ov = Overlay::<String>::new();
-    ov.delete("b", &c);
-    assert!(ov.get(&c, "b").is_none());
+    let mut ov = Overlay::<String, String>::new();
+    ov.delete(&"b".into(), &c);
+    assert!(ov.get(&c, &"b".into()).is_none());
 }
 
 #[test]
@@ -41,11 +41,11 @@ fn contains_key_merged() {
     let c = committed();
     let mut ov = Overlay::new();
     ov.put("new".into(), "value".into());
-    ov.delete("a", &c);
-    assert!(!ov.contains_key(&c, "a"));
-    assert!(ov.contains_key(&c, "b"));
-    assert!(ov.contains_key(&c, "new"));
-    assert!(!ov.contains_key(&c, "z"));
+    ov.delete(&"a".into(), &c);
+    assert!(!ov.contains_key(&c, &"a".into()));
+    assert!(ov.contains_key(&c, &"b".into()));
+    assert!(ov.contains_key(&c, &"new".into()));
+    assert!(!ov.contains_key(&c, &"z".into()));
 }
 
 #[test]
@@ -53,7 +53,7 @@ fn values_merges_committed_and_overlay() {
     let c = committed();
     let mut ov = Overlay::new();
     ov.put("a".into(), "ALPHA".into()); // override
-    ov.delete("c", &c); // delete
+    ov.delete(&"c".into(), &c); // delete
     ov.put("d".into(), "delta".into()); // new
 
     let mut vals: Vec<_> = ov.values(&c).cloned().collect();
@@ -68,7 +68,7 @@ fn retain_marks_deletes_and_returns_keys() {
     ov.put("d".into(), "delta".into());
 
     // Keep only values starting with 'a' or 'd'
-    let removed = ov.retain(&c, |_, v| v.starts_with('a') || v.starts_with('d'));
+    let removed = ov.retain(&c, |_, v: &String| v.starts_with('a') || v.starts_with('d'));
     let mut removed_sorted = removed.clone();
     removed_sorted.sort();
     assert_eq!(removed_sorted, vec!["b", "c"]);
@@ -83,11 +83,11 @@ fn retain_marks_deletes_and_returns_keys() {
 fn delete_then_put_same_key() {
     let c = committed();
     let mut ov = Overlay::new();
-    ov.delete("a", &c);
-    assert!(ov.get(&c, "a").is_none());
+    ov.delete(&"a".into(), &c);
+    assert!(ov.get(&c, &"a".into()).is_none());
 
     ov.put("a".into(), "resurrected".into());
-    assert_eq!(ov.get(&c, "a").unwrap(), "resurrected");
+    assert_eq!(ov.get(&c, &"a".into()).unwrap(), "resurrected");
 }
 
 #[test]
@@ -95,7 +95,7 @@ fn iter_merges_both() {
     let c = committed();
     let mut ov = Overlay::new();
     ov.put("b".into(), "BETA".into());
-    ov.delete("c", &c);
+    ov.delete(&"c".into(), &c);
 
     let mut pairs: Vec<_> = ov
         .iter(&c)
@@ -110,27 +110,51 @@ fn iter_merges_both() {
 
 #[test]
 fn is_empty_on_fresh_overlay() {
-    let ov = Overlay::<String>::new();
+    let ov = Overlay::<String, String>::new();
     assert!(ov.is_empty());
 }
 
 #[test]
 fn retain_removes_overlay_put_that_shadows_committed() {
-    // Bug scenario: committed has "a", tx updates "a" (overlay put),
-    // retain removes it — committed "a" must NOT leak through.
     let c = committed();
     let mut ov = Overlay::new();
-    ov.put("a".into(), "ALPHA_UPDATED".into()); // shadows committed "a"
+    ov.put("a".into(), "ALPHA_UPDATED".into());
 
-    // Retain only values starting with 'b' — should remove "ALPHA_UPDATED"
-    let removed = ov.retain(&c, |_, v| v.starts_with('b'));
+    let removed = ov.retain(&c, |_, v: &String| v.starts_with('b'));
 
-    // "a" should be gone from the merged view (not fall through to committed)
-    assert!(ov.get(&c, "a").is_none());
-    // "b" (committed) and nothing else should remain
+    assert!(ov.get(&c, &"a".into()).is_none());
     let vals: Vec<_> = ov.values(&c).cloned().collect();
     assert_eq!(vals, vec!["beta"]);
-    // "a", "c", and the overlay "a" should all be in removed
     assert!(removed.contains(&"a".to_string()));
     assert!(removed.contains(&"c".to_string()));
+}
+
+// HashMap-committed variants
+#[test]
+fn get_with_hashmap_committed() {
+    use std::collections::HashMap;
+    let c: HashMap<String, String> =
+        HashMap::from([("a".into(), "alpha".into()), ("b".into(), "beta".into())]);
+    let mut ov = Overlay::<String, String>::new();
+    assert_eq!(ov.get(&c, &"a".into()).unwrap(), "alpha");
+
+    ov.put("a".into(), "ALPHA".into());
+    assert_eq!(ov.get(&c, &"a".into()).unwrap(), "ALPHA");
+
+    ov.delete(&"b".into(), &c);
+    assert!(ov.get(&c, &"b".into()).is_none());
+}
+
+#[test]
+fn values_with_hashmap_committed() {
+    use std::collections::HashMap;
+    let c: HashMap<String, String> =
+        HashMap::from([("a".into(), "alpha".into()), ("b".into(), "beta".into())]);
+    let mut ov = Overlay::new();
+    ov.put("c".into(), "gamma".into());
+    ov.delete(&"a".into(), &c);
+
+    let mut vals: Vec<_> = ov.values(&c).cloned().collect();
+    vals.sort();
+    assert_eq!(vals, vec!["beta", "gamma"]);
 }
