@@ -1,3 +1,5 @@
+use std::net::{IpAddr, Ipv4Addr, Ipv6Addr};
+
 use super::key::EtchKey;
 
 #[test]
@@ -182,4 +184,105 @@ fn i64_wrong_length() {
     assert!(result.is_err());
     let err = result.unwrap_err().to_string();
     assert!(err.contains("expected 8 bytes"), "got: {err}");
+}
+
+// ---------------------------------------------------------------------------
+// IpAddr tests
+// ---------------------------------------------------------------------------
+
+#[test]
+fn ipv4_roundtrip() {
+    let key = Ipv4Addr::new(127, 0, 0, 1);
+    let bytes = key.to_bytes();
+    assert_eq!(bytes.len(), 4);
+    let restored = Ipv4Addr::from_bytes(&bytes).unwrap();
+    assert_eq!(key, restored);
+}
+
+#[test]
+fn ipv6_roundtrip() {
+    let key = Ipv6Addr::LOCALHOST;
+    let bytes = key.to_bytes();
+    assert_eq!(bytes.len(), 16);
+    let restored = Ipv6Addr::from_bytes(&bytes).unwrap();
+    assert_eq!(key, restored);
+}
+
+#[test]
+fn ipaddr_v4_roundtrip() {
+    let key = IpAddr::V4(Ipv4Addr::new(192, 168, 1, 100));
+    let bytes = key.to_bytes();
+    assert_eq!(bytes.len(), 5); // 1 discriminant + 4 octets
+    assert_eq!(bytes[0], 4);
+    let restored = IpAddr::from_bytes(&bytes).unwrap();
+    assert_eq!(key, restored);
+}
+
+#[test]
+fn ipaddr_v6_roundtrip() {
+    let key: IpAddr = "2001:db8::1".parse().unwrap();
+    let bytes = key.to_bytes();
+    assert_eq!(bytes.len(), 17); // 1 discriminant + 16 octets
+    assert_eq!(bytes[0], 6);
+    let restored = IpAddr::from_bytes(&bytes).unwrap();
+    assert_eq!(key, restored);
+}
+
+#[test]
+fn ipaddr_wrong_discriminant() {
+    let bytes = vec![99u8, 1, 2, 3, 4];
+    let result = IpAddr::from_bytes(&bytes);
+    assert!(result.is_err());
+    let err = result.unwrap_err().to_string();
+    assert!(err.contains("discriminant"), "got: {err}");
+}
+
+#[test]
+fn ipaddr_empty_bytes() {
+    let result = IpAddr::from_bytes(&[]);
+    assert!(result.is_err());
+}
+
+// ---------------------------------------------------------------------------
+// Tuple tests
+// ---------------------------------------------------------------------------
+
+#[test]
+fn tuple_string_string_roundtrip() {
+    let key = ("hello".to_string(), "world".to_string());
+    let bytes = key.to_bytes();
+    let restored = <(String, String)>::from_bytes(&bytes).unwrap();
+    assert_eq!(key, restored);
+}
+
+#[test]
+fn tuple_ipaddr_string_roundtrip() {
+    let key = (IpAddr::V4(Ipv4Addr::new(10, 0, 0, 1)), "sshd".to_string());
+    let bytes = key.to_bytes();
+    let restored = <(IpAddr, String)>::from_bytes(&bytes).unwrap();
+    assert_eq!(key, restored);
+}
+
+#[test]
+fn tuple_u32_u32_roundtrip() {
+    let key = (42u32, 99u32);
+    let bytes = key.to_bytes();
+    let restored = <(u32, u32)>::from_bytes(&bytes).unwrap();
+    assert_eq!(key, restored);
+}
+
+#[test]
+fn tuple_empty_components() {
+    let key = ("".to_string(), "test".to_string());
+    let bytes = key.to_bytes();
+    let restored = <(String, String)>::from_bytes(&bytes).unwrap();
+    assert_eq!(key, restored);
+}
+
+#[test]
+fn tuple_too_short() {
+    let result = <(String, String)>::from_bytes(&[1, 2, 3]);
+    assert!(result.is_err());
+    let err = result.unwrap_err().to_string();
+    assert!(err.contains("too short"), "got: {err}");
 }

@@ -7,8 +7,8 @@
 use std::path::PathBuf;
 use std::sync::Arc;
 
-use serde::de::DeserializeOwned;
 use serde::Serialize;
+use serde::de::DeserializeOwned;
 
 use crate::backend::Backend;
 use crate::error::Result;

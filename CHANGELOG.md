@@ -1,5 +1,10 @@
 # Changelog
 
+## v0.3.2
+
+- key: EtchKey impls for Ipv4Addr, Ipv6Addr, and IpAddr with discriminant-tagged encoding
+- key: generic (A, B) tuple key impl with length-prefixed encoding
+
 ## v0.3.1
 
 - async: AsyncStore::open_wal for opening WAL-backed stores directly from async contexts
