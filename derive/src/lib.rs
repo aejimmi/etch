@@ -6,7 +6,7 @@
 use proc_macro::TokenStream;
 use quote::{format_ident, quote};
 use syn::spanned::Spanned;
-use syn::{parse_macro_input, DeriveInput, Fields, PathSegment};
+use syn::{DeriveInput, Fields, PathSegment, parse_macro_input};
 
 /// Parsed info about one `#[etch(collection = N)]` field.
 struct EtchField {
@@ -30,7 +30,7 @@ fn parse_etch_fields(input: &DeriveInput) -> syn::Result<Vec<EtchField>> {
             return Err(syn::Error::new_spanned(
                 input,
                 "etch derives only work on structs",
-            ))
+            ));
         }
     };
     let fields = match &data.fields {
@@ -39,7 +39,7 @@ fn parse_etch_fields(input: &DeriveInput) -> syn::Result<Vec<EtchField>> {
             return Err(syn::Error::new_spanned(
                 input,
                 "etch derives require named fields",
-            ))
+            ));
         }
     };
 
@@ -70,10 +70,7 @@ fn parse_etch_fields(input: &DeriveInput) -> syn::Result<Vec<EtchField>> {
 
         let ident = field.ident.clone().unwrap();
         let (map_kind, key_ty, value_ty) = parse_map_type(&field.ty).ok_or_else(|| {
-            syn::Error::new(
-                field.ty.span(),
-                "expected BTreeMap<K, V> or HashMap<K, V>",
-            )
+            syn::Error::new(field.ty.span(), "expected BTreeMap<K, V> or HashMap<K, V>")
         })?;
 
         result.push(EtchField {
@@ -161,9 +158,13 @@ fn derive_replayable_inner(input: &DeriveInput) -> syn::Result<proc_macro2::Toke
                 MapKind::HashMap => quote! { etchdb::apply_op_hash_with },
             };
             quote! {
-                #id => #apply_fn(&mut self.#field, op, |bytes| {
-                    <#key_ty as etchdb::EtchKey>::from_bytes(bytes)
-                })?,
+                #id => {
+                    if let Err(e) = #apply_fn(&mut self.#field, op, |bytes| {
+                        <#key_ty as etchdb::EtchKey>::from_bytes(bytes)
+                    }) {
+                        eprintln!("etchdb: skipped op on collection {}: {}", #id, e);
+                    }
+                }
             }
         })
         .collect();

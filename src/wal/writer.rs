@@ -86,7 +86,17 @@ impl<T: Replayable + Serialize + DeserializeOwned + Default> WalBackend<T> {
             if bytes.is_empty() {
                 T::default()
             } else {
-                Self::decode_snapshot(&bytes)?
+                match Self::decode_snapshot(&bytes) {
+                    Ok(s) => s,
+                    Err(Error::Postcard(e)) => {
+                        eprintln!(
+                            "etchdb: snapshot deserialization failed ({}), starting from default state",
+                            e
+                        );
+                        T::default()
+                    }
+                    Err(e) => return Err(e),
+                }
             }
         } else {
             T::default()
@@ -99,7 +109,9 @@ impl<T: Replayable + Serialize + DeserializeOwned + Default> WalBackend<T> {
         let file_len = std::fs::metadata(&wal_path)?.len();
 
         for ops in &entries {
-            state.apply(ops)?;
+            if let Err(e) = state.apply(ops) {
+                eprintln!("etchdb: skipped WAL entry during replay: {}", e);
+            }
         }
 
         // Truncate at corruption point if needed.

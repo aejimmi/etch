@@ -1,6 +1,6 @@
 [package]
 name = "etchdb"
-version = "0.3.2"
+version = "0.3.3"
 edition = "2024"
 description = "A fast, embedded database for Rust. Minimal dependencies. No C code. No build scripts."
 license = "MIT"
