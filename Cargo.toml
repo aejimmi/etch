@@ -1,10 +1,22 @@
-[package]
-name = "etchdb"
+[workspace]
+members = ["derive"]
+
+[workspace.package]
 version = "0.3.3"
 edition = "2024"
-description = "A fast, embedded database for Rust. Minimal dependencies. No C code. No build scripts."
 license = "MIT"
 repository = "https://github.com/tell-rs/etch"
+
+[workspace.dependencies]
+etchdb-derive = { path = "derive", version = "=0.3.3" }
+
+[package]
+name = "etchdb"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "A fast, embedded database for Rust. Minimal dependencies. No C code. No build scripts."
 authors = ["Tell Contributors"]
 
 [features]
@@ -13,7 +25,7 @@ async = ["tokio"]
 compression = ["zstd"]
 
 [dependencies]
-etchdb-derive = { path = "derive", version = "0.3.0" }
+etchdb-derive.workspace = true
 xxhash-rust = { version = "0.8", features = ["xxh3"] }
 parking_lot = "0.12"
 postcard = { version = "1", features = ["alloc"] }

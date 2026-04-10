@@ -1,10 +1,10 @@
 [package]
 name = "etchdb-derive"
-version = "0.3.0"
-edition = "2024"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
 description = "Derive macros for etchdb"
-license = "MIT"
-repository = "https://github.com/tell-rs/etch"
 
 [lib]
 proc-macro = true
