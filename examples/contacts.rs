@@ -31,7 +31,11 @@ const PEOPLE: u8 = 0;
 // One line per collection: route ops to the right BTreeMap.
 
 impl Replayable for ContactBook {
-    fn apply(&mut self, ops: &[Op]) -> etchdb::Result<()> {
+    fn apply_with_format(
+        &mut self,
+        ops: &[Op],
+        _format: etchdb::ReplayFormat,
+    ) -> etchdb::Result<()> {
         for op in ops {
             etchdb::apply_op(&mut self.people, op)?;
         }

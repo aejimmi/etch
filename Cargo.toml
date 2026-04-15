@@ -2,13 +2,14 @@
 members = ["derive"]
 
 [workspace.package]
-version = "0.3.3"
+version = "0.4.0"
 edition = "2024"
+rust-version = "1.89"
 license = "MIT"
 repository = "https://github.com/tell-rs/etch"
 
 [workspace.dependencies]
-etchdb-derive = { path = "derive", version = "=0.3.3" }
+etchdb-derive = { path = "derive", version = "=0.4.0" }
 
 [package]
 name = "etchdb"
@@ -29,6 +30,7 @@ etchdb-derive.workspace = true
 xxhash-rust = { version = "0.8", features = ["xxh3"] }
 parking_lot = "0.12"
 postcard = { version = "1", features = ["alloc"] }
+rmp-serde = "1"
 serde = { version = "1", features = ["derive"] }
 thiserror = "2"
 tokio = { version = "1", features = ["rt-multi-thread", "macros"], optional = true }

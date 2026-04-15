@@ -7,6 +7,7 @@
 use serde::Serialize;
 use serde::de::DeserializeOwned;
 
+use super::diff::encode_versioned_value;
 use super::key::EtchKey;
 use super::op::Op;
 use super::overlay::{MapRead, Overlay};
@@ -21,6 +22,7 @@ pub struct Collection<'a, K: Ord + Clone, V, M> {
     overlay: Overlay<K, V>,
     ops: Vec<Op>,
     collection_id: u8,
+    schema_version: u16,
 }
 
 impl<'a, K, V, M> Collection<'a, K, V, M>
@@ -30,12 +32,17 @@ where
     M: MapRead<K, V>,
 {
     /// Create a new collection handle for a transaction.
-    pub fn new(committed: &'a M, collection_id: u8) -> Self {
+    ///
+    /// `schema_version` is the current version for this collection's value
+    /// type. Values written through this handle will carry this version tag
+    /// in their WAL envelope, enabling per-value migration on replay.
+    pub fn new(committed: &'a M, collection_id: u8, schema_version: u16) -> Self {
         Self {
             committed,
             overlay: Overlay::new(),
             ops: Vec::new(),
             collection_id,
+            schema_version,
         }
     }
 
@@ -46,10 +53,12 @@ where
 
     /// Insert or update a key-value pair.
     pub fn put(&mut self, key: K, value: V) {
+        let encoded =
+            encode_versioned_value(self.schema_version, &value).expect("versioned encode");
         self.ops.push(Op::Put {
             collection: self.collection_id,
             key: key.to_bytes(),
-            value: postcard::to_allocvec(&value).expect("serialize"),
+            value: encoded,
         });
         self.overlay.put(key, value);
     }

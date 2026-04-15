@@ -30,7 +30,11 @@
 //! const ITEMS: u8 = 0;
 //!
 //! impl Replayable for AppState {
-//!     fn apply(&mut self, ops: &[Op]) -> etchdb::Result<()> {
+//!     fn apply_with_format(
+//!         &mut self,
+//!         ops: &[Op],
+//!         _format: etchdb::ReplayFormat,
+//!     ) -> etchdb::Result<()> {
 //!         for op in ops { etchdb::apply_op(&mut self.items, op)?; }
 //!         Ok(())
 //!     }
@@ -99,9 +103,14 @@ pub use error::{Error, Result};
 pub use etchdb_derive::{Replayable, Transactable};
 pub use store::{FlushPolicy, Ref, Store};
 pub use wal::{
-    Collection, EtchKey, IncrementalSave, MapRead, Op, Overlay, Replayable, Transactable,
+    ChainResult, Collection, CollectionSection, EtchKey, IncrementalSave, MapRead, MigrationError,
+    MigrationFn, MigrationSet, Op, Overlay, Quarantine, QuarantineReason, QuarantinedEntry,
+    ReplayContext, ReplayFormat, Replayable, SnapshotEntry, SnapshotPayload, Transactable,
     WalBackend, apply_op, apply_op_bytes, apply_op_hash, apply_op_hash_bytes, apply_op_hash_with,
-    apply_op_with, apply_overlay_btree, apply_overlay_hash,
+    apply_op_versioned_hash_with, apply_op_versioned_hash_with_ctx, apply_op_versioned_with,
+    apply_op_versioned_with_ctx, apply_op_with, apply_overlay_btree, apply_overlay_hash,
+    encode_msgpack_value, encode_versioned_value, format_op_key, load_snapshot_entry,
+    split_versioned_value,
 };
 
 #[cfg(test)]
@@ -115,3 +124,7 @@ mod async_store_test;
 #[cfg(test)]
 #[path = "derive_test.rs"]
 mod derive_test;
+
+#[cfg(test)]
+#[path = "migration_scenarios_test.rs"]
+mod migration_scenarios_test;

@@ -13,7 +13,11 @@ struct TestState {
 }
 
 impl Replayable for TestState {
-    fn apply(&mut self, ops: &[Op]) -> crate::Result<()> {
+    fn apply_with_format(
+        &mut self,
+        ops: &[Op],
+        _format: crate::wal::ReplayFormat,
+    ) -> crate::Result<()> {
         for op in ops {
             crate::wal::apply_op(&mut self.items, op)?;
         }

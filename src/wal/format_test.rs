@@ -226,7 +226,7 @@ fn bad_version_detected() {
     assert!(result.is_err());
     let err = result.unwrap_err();
     assert!(
-        err.to_string().contains("unsupported version"),
+        err.to_string().contains("unsupported WAL version"),
         "expected version error, got: {err}"
     );
 }

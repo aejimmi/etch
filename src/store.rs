@@ -118,6 +118,56 @@ impl<T: Replayable + Serialize + DeserializeOwned + Default> Store<T, WalBackend
             flusher: None,
         })
     }
+
+    /// Snapshot of currently quarantined entries (clones).
+    ///
+    /// Use this to surface schema-drift failures to operators. Entries
+    /// persist across restarts until `purge_quarantine` is called or a
+    /// normal write supersedes them.
+    pub fn quarantined(&self) -> Vec<crate::QuarantinedEntry> {
+        self.backend.quarantined()
+    }
+
+    /// Drop all quarantined entries. Explicit — never called automatically.
+    pub fn purge_quarantine(&self) -> Result<()> {
+        self.backend.purge_quarantine()
+    }
+
+    /// Retry migration on all quarantined entries with the current
+    /// `T::migrations()` registry.
+    ///
+    /// For each entry that successfully migrates, the recovered value is
+    /// written back through the normal WAL path (so it becomes visible to
+    /// readers and will survive the next snapshot). Entries that still
+    /// fail remain in quarantine.
+    ///
+    /// Returns the number of entries successfully recovered.
+    pub fn retry_quarantine(&self) -> Result<usize> {
+        let recovered_ops = self.backend.retry_quarantine()?;
+        if recovered_ops.is_empty() {
+            return Ok(0);
+        }
+        let n = recovered_ops.len();
+
+        // Append the synthetic Put ops to the WAL and apply in-memory so
+        // subsequent reads see the recovered values.
+        if let Some(ref inc) = self.incremental {
+            inc.save_ops(&recovered_ops)?;
+            inc.sync()?;
+        }
+        let migrations = T::migrations();
+        let mut quarantine_scratch = crate::Quarantine::new();
+        let mut ctx = crate::ReplayContext::new(
+            crate::ReplayFormat::Versioned,
+            &migrations,
+            &mut quarantine_scratch,
+        );
+        {
+            let mut state = self.state.write();
+            state.apply_with_ctx(&recovered_ops, &mut ctx)?;
+        }
+        Ok(n)
+    }
 }
 
 impl<T: Clone, B: Backend<T>> Store<T, B> {

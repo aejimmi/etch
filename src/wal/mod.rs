@@ -15,19 +15,28 @@ mod diff;
 mod format;
 pub mod key;
 pub mod merge;
+pub mod migration;
 mod op;
 pub mod overlay;
+pub mod quarantine;
+pub mod snapshot;
 mod writer;
 
 pub use collection::Collection;
 pub use diff::{
-    Replayable, apply_op, apply_op_bytes, apply_op_hash, apply_op_hash_bytes, apply_op_hash_with,
-    apply_op_with,
+    ReplayContext, ReplayFormat, Replayable, apply_op, apply_op_bytes, apply_op_hash,
+    apply_op_hash_bytes, apply_op_hash_with, apply_op_versioned_hash_with,
+    apply_op_versioned_hash_with_ctx, apply_op_versioned_with, apply_op_versioned_with_ctx,
+    apply_op_with, encode_msgpack_value, encode_versioned_value, load_snapshot_entry,
+    split_versioned_value,
 };
 pub use key::EtchKey;
 pub use merge::{Transactable, apply_overlay_btree, apply_overlay_hash};
-pub use op::Op;
+pub use migration::{ChainResult, MigrationError, MigrationFn, MigrationSet};
+pub use op::{Op, format_op_key};
 pub use overlay::{MapRead, Overlay};
+pub use quarantine::{QUARANTINE_FILE, Quarantine, QuarantineReason, QuarantinedEntry};
+pub use snapshot::{CollectionSection, SnapshotEntry, SnapshotPayload};
 pub use writer::{IncrementalSave, WalBackend};
 
 #[cfg(test)]

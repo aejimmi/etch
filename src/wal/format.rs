@@ -13,7 +13,12 @@ use super::op::Op;
 use crate::error::{Error, Result};
 
 const MAGIC: &[u8; 4] = b"EWAL";
-const VERSION: u8 = 3;
+/// Current WAL format version written for new files. Legacy v3 remains
+/// readable during the one-time upgrade path.
+const VERSION: u8 = 4;
+/// Lowest WAL version this build can still read. v3 held postcard values;
+/// v4 holds per-value-versioned msgpack values.
+const MIN_READABLE_VERSION: u8 = 3;
 const HEADER_SIZE: u64 = 16;
 
 /// WAL file writer — wraps a BufWriter for appends, raw File for reads.
@@ -168,10 +173,60 @@ impl WalFile {
         Ok(())
     }
 
+    /// Copy current WAL contents to `backup_path`, then reset self to empty.
+    ///
+    /// Used at compaction: preserves a recoverable copy of the pre-compaction
+    /// WAL (as `wal.prev`) before the new snapshot supersedes it. If the
+    /// snapshot write crashes or the new snapshot turns out to be unreadable,
+    /// the backup still holds every op that was compacted.
+    ///
+    /// The backup file is created atomically (overwriting any existing
+    /// backup from a prior compaction) and fsync'd before this returns.
+    pub fn rotate_to_backup(&mut self, wal_path: &Path, backup_path: &Path) -> Result<()> {
+        // Flush and sync the current WAL so every op we've seen in memory
+        // is on disk before we copy it.
+        self.writer.flush()?;
+        self.writer.get_ref().sync_all()?;
+
+        // Copy via std::io::copy — no rename/handle games, just bytes.
+        // O(WAL size) which is bounded by the snapshot threshold.
+        {
+            let mut src = File::open(wal_path)?;
+            let mut dst = OpenOptions::new()
+                .create(true)
+                .truncate(true)
+                .write(true)
+                .open(backup_path)?;
+            std::io::copy(&mut src, &mut dst)?;
+            dst.sync_all()?;
+        }
+
+        // Reset the live WAL (header + truncate) so new writes start fresh.
+        self.reset()?;
+        Ok(())
+    }
+
     /// Current number of bytes written (including header).
     #[cfg(test)]
     pub fn offset(&self) -> u64 {
         self.offset
+    }
+
+    /// Read just the header-version byte from a WAL file without opening
+    /// it for writes. Used during load to decide between legacy and
+    /// versioned replay formats.
+    pub fn version_of(path: &Path) -> Result<u8> {
+        let mut f = File::open(path)?;
+        let mut header = [0u8; HEADER_SIZE as usize];
+        use std::io::Read;
+        f.read_exact(&mut header)?;
+        if &header[..4] != MAGIC {
+            return Err(Error::WalCorrupted {
+                offset: 0,
+                reason: format!("bad magic: got {:?}", &header[..4]),
+            });
+        }
+        Ok(header[4])
     }
 }
 
@@ -195,10 +250,13 @@ fn validate_header(r: &mut impl Read) -> Result<()> {
 
     let mut ver = [0u8; 1];
     r.read_exact(&mut ver)?;
-    if ver[0] != VERSION {
+    if ver[0] < MIN_READABLE_VERSION || ver[0] > VERSION {
         return Err(Error::WalCorrupted {
             offset: 4,
-            reason: format!("unsupported version: {}", ver[0]),
+            reason: format!(
+                "unsupported WAL version {}, this build reads v{}..v{}",
+                ver[0], MIN_READABLE_VERSION, VERSION
+            ),
         });
     }
 

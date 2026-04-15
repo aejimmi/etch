@@ -1,5 +1,21 @@
 # Changelog
 
+## v0.4.0
+
+New:
+- migrations: register single-hop migration functions that compose into chains on load; each runs inside catch_unwind so a buggy one can't crash the process
+- schema: per-value version tag via #[etch(version = V)] — values migrate independently as schemas evolve
+- quarantine: values that can't migrate are preserved with a reason; retry after shipping the missing migration, or drop explicitly
+- drift: schema fingerprint mismatch on load prints a prominent warning — catches "bumped struct, forgot to bump version" bugs
+- lock: exclusive .lock file prevents two processes from opening the same directory; second opener gets DatabaseLocked with the holder's PID
+- snapshot: new envelope with per-value version tags, serialized as named msgpack so adding fields doesn't break older readers
+- compaction: crash-safe rotation — old WAL preserved as wal.prev until the new snapshot is confirmed readable on next boot
+
+Breaking:
+- wal: format bumped from v3 to v4; legacy v3 WALs still read, new writes are v4
+- replayable: apply_with_format now required; manual trait impls must accept a ReplayFormat argument
+- deps: rmp-serde added as a required dependency
+
 ## v0.3.2
 
 - key: EtchKey impls for Ipv4Addr, Ipv6Addr, and IpAddr with discriminant-tagged encoding

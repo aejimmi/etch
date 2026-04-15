@@ -1,4 +1,8 @@
 **/target/
 /data
 Cargo.lock
+
 .claude/
+CLAUDE.md
+AGENTS.md
+AGENTS-CONTEXT.md

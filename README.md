@@ -29,7 +29,6 @@ Your Rust structs live in memory, reads are direct field access through an `RwLo
 - Not a SQL database — no query language, no query engine, no joins
 - Data must fit in memory — your entire state lives in a struct
 - Single-process — no replication, no networking, no multi-process access
-- No schema migrations — you version your types however you like
 
 ## Installation
 
@@ -41,7 +40,7 @@ Or add to your `Cargo.toml`:
 
 ```toml
 [dependencies]
-etchdb = "0.3"
+etchdb = "0.4"
 ```
 
 ## Quick start
@@ -98,11 +97,15 @@ cargo run --example contacts
 ## Features
 
 - **Derive macros** — `#[derive(Replayable, Transactable)]` eliminates ~60 lines of boilerplate per state type
+- **Schema migrations** — single-hop migration functions compose into chains, per-value version tags drive dispatch, each migration runs inside `catch_unwind`
+- **Quarantine** — values that can't migrate are preserved with a reason; `retry_quarantine()` drains them once you ship the missing migration
+- **Schema drift warning** — fingerprints `(collection, version)` pairs and warns on load when they change without a matching migration
+- **Exclusive lock** — a second process opening the same directory gets `DatabaseLocked` with the holder's PID
 - **Async support** — `AsyncStore::open_wal` + async `write`/`flush` for tokio runtimes via `block_in_place`
 - **Snapshot compaction** — WAL auto-compacts after a configurable threshold, with optional zstd compression (`compression` feature)
 - **Two flush modes** — immediate fsync or grouped batching for throughput
 - **Zero-clone writes** — `Overlay` + `Transactable` captures changes without cloning state
-- **BTreeMap and HashMap** — generic key types (`String`, `Vec<u8>`, integers) via `EtchKey` trait
+- **BTreeMap and HashMap** — generic key types (`String`, `Vec<u8>`, integers, IP addresses, tuples) via `EtchKey` trait
 - **Pluggable backends** — `WalBackend`, `NullBackend`, or bring your own
 - **Corruption recovery** — truncates incomplete WAL entries, keeps valid prefix
 

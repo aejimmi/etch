@@ -14,7 +14,11 @@ struct State {
 }
 
 impl Replayable for State {
-    fn apply(&mut self, ops: &[Op]) -> crate::Result<()> {
+    fn apply_with_format(
+        &mut self,
+        ops: &[Op],
+        _format: crate::wal::ReplayFormat,
+    ) -> crate::Result<()> {
         for op in ops {
             crate::wal::apply_op(&mut self.items, op)?;
         }
@@ -52,13 +56,17 @@ fn load_returns_default_on_empty_dir() {
 #[test]
 fn save_and_load_roundtrip() {
     let dir = tempfile::tempdir().unwrap();
-    let backend = WalBackend::<State>::open(dir.path()).unwrap();
+    let state = {
+        let backend = WalBackend::<State>::open(dir.path()).unwrap();
 
-    let mut state = State::default();
-    state.items.insert("a".into(), "alpha".into());
-    state.items.insert("b".into(), "beta".into());
+        let mut state = State::default();
+        state.items.insert("a".into(), "alpha".into());
+        state.items.insert("b".into(), "beta".into());
 
-    backend.save(&state).unwrap();
+        backend.save(&state).unwrap();
+        state
+        // backend dropped here — releases file lock
+    };
 
     // Reopen and load.
     let backend2 = WalBackend::<State>::open(dir.path()).unwrap();
@@ -187,7 +195,8 @@ fn snapshot_compacts_wal() {
     let (entries, _) = super::format::WalFile::iter_entries(&wal_path).unwrap();
     assert!(entries.is_empty());
 
-    // State should survive reload.
+    // State should survive reload (drop old backend first to release lock).
+    drop(backend);
     let backend2 = WalBackend::<State>::open(dir.path()).unwrap();
     let reloaded = backend2.load().unwrap();
     assert_eq!(reloaded.items.get("a").unwrap(), "1");
@@ -365,12 +374,15 @@ fn snapshot_has_magic_and_version() {
 #[test]
 fn snapshot_roundtrip_with_envelope() {
     let dir = tempfile::tempdir().unwrap();
-    let backend = WalBackend::<State>::open(dir.path()).unwrap();
+    let state = {
+        let backend = WalBackend::<State>::open(dir.path()).unwrap();
 
-    let mut state = State::default();
-    state.items.insert("x".into(), "10".into());
-    state.items.insert("y".into(), "20".into());
-    backend.save(&state).unwrap();
+        let mut state = State::default();
+        state.items.insert("x".into(), "10".into());
+        state.items.insert("y".into(), "20".into());
+        backend.save(&state).unwrap();
+        state
+    };
 
     let backend2 = WalBackend::<State>::open(dir.path()).unwrap();
     let loaded = backend2.load().unwrap();
@@ -393,40 +405,38 @@ fn snapshot_version_mismatch_returns_error() {
     std::fs::write(dir.path().join("snapshot.postcard"), &bytes).unwrap();
 
     let backend = WalBackend::<State>::open(dir.path()).unwrap();
-    let result = backend.load();
-    assert!(result.is_err());
-    let err = result.unwrap_err();
+    // New behavior: unreadable snapshots are preserved as .backup and load
+    // returns default state rather than erroring. This preserves user data
+    // that would otherwise be destroyed by the next compaction.
+    let loaded = backend.load().unwrap();
+    assert!(loaded.items.is_empty(), "fell back to default state");
     assert!(
-        err.to_string().contains("snapshot version mismatch"),
-        "expected version mismatch error, got: {err}"
+        dir.path().join("snapshot.backup").exists(),
+        "original snapshot preserved as .backup"
     );
 }
 
-/// A zstd-compressed snapshot (version 2) without the compression feature returns an error.
+/// A zstd-compressed snapshot (version 2) without the compression feature
+/// is preserved as .backup and falls back to default state.
 #[cfg(not(feature = "compression"))]
 #[test]
 fn zstd_snapshot_without_feature_returns_error() {
     let dir = tempfile::tempdir().unwrap();
 
-    // Manually write a snapshot with version 2 (zstd).
     let state = State::default();
     let payload = postcard::to_allocvec(&state).unwrap();
     let mut bytes = Vec::new();
     bytes.extend_from_slice(b"ESNA");
     bytes.push(2); // zstd version
-    bytes.extend_from_slice(&payload); // not actually compressed, but we hit the version check first
+    bytes.extend_from_slice(&payload);
 
     std::fs::create_dir_all(dir.path()).unwrap();
     std::fs::write(dir.path().join("snapshot.postcard"), &bytes).unwrap();
 
     let backend = WalBackend::<State>::open(dir.path()).unwrap();
-    let result = backend.load();
-    assert!(result.is_err());
-    let err = result.unwrap_err();
-    assert!(
-        err.to_string().contains("enable the `compression` feature"),
-        "expected compression feature error, got: {err}"
-    );
+    let loaded = backend.load().unwrap();
+    assert!(loaded.items.is_empty());
+    assert!(dir.path().join("snapshot.backup").exists());
 }
 
 /// Raw v1 snapshots are always readable regardless of compression feature.
@@ -463,13 +473,11 @@ fn snapshot_missing_envelope_returns_error() {
     std::fs::write(dir.path().join("snapshot.postcard"), &raw).unwrap();
 
     let backend = WalBackend::<State>::open(dir.path()).unwrap();
-    let result = backend.load();
-    assert!(result.is_err());
-    let err = result.unwrap_err();
-    assert!(
-        err.to_string().contains("missing snapshot envelope"),
-        "expected envelope error, got: {err}"
-    );
+    // New behavior: missing envelope is treated as corrupt snapshot —
+    // preserved as .backup, load returns default state.
+    let loaded = backend.load().unwrap();
+    assert!(loaded.items.is_empty());
+    assert!(dir.path().join("snapshot.backup").exists());
 }
 
 /// When compression is enabled, snapshot write+read roundtrips through zstd.

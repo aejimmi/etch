@@ -33,7 +33,11 @@ struct User {
 const USERS: u8 = 0;
 
 impl Replayable for State {
-    fn apply(&mut self, ops: &[Op]) -> etchdb::Result<()> {
+    fn apply_with_format(
+        &mut self,
+        ops: &[Op],
+        _format: etchdb::ReplayFormat,
+    ) -> etchdb::Result<()> {
         for op in ops {
             etchdb::apply_op(&mut self.users, op)?;
         }
@@ -108,7 +112,11 @@ struct HashState {
 }
 
 impl Replayable for HashState {
-    fn apply(&mut self, ops: &[Op]) -> etchdb::Result<()> {
+    fn apply_with_format(
+        &mut self,
+        ops: &[Op],
+        _format: etchdb::ReplayFormat,
+    ) -> etchdb::Result<()> {
         for op in ops {
             etchdb::apply_op_hash(&mut self.users, op)?;
         }
