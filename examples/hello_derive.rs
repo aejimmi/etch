@@ -33,14 +33,14 @@ fn main() -> etchdb::Result<()> {
                 title: "Learn etch".into(),
                 done: false,
             },
-        );
+        )?;
         tx.items.put(
             "2".into(),
             Todo {
                 title: "Build something".into(),
                 done: false,
             },
-        );
+        )?;
         Ok(())
     })?;
 
@@ -55,7 +55,7 @@ fn main() -> etchdb::Result<()> {
     // Update: read-then-write using Collection methods.
     store.write(|tx| {
         if let Some(t) = tx.items.get(&"1".into()).cloned() {
-            tx.items.put("1".into(), Todo { done: true, ..t });
+            tx.items.put("1".into(), Todo { done: true, ..t })?;
         }
         Ok(())
     })?;

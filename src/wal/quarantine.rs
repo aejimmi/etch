@@ -14,6 +14,7 @@
 //! - Are removed when a new write supersedes the quarantined key.
 //! - Are never auto-deleted — only explicit purge removes them.
 
+use std::io::Write;
 use std::path::Path;
 
 use serde::{Deserialize, Serialize};
@@ -206,6 +207,9 @@ impl Quarantine {
         if self.entries.is_empty() {
             if path.exists() {
                 std::fs::remove_file(&path)?;
+                // Make the removal durable so a crash can't resurrect a purged
+                // quarantine on the next open.
+                super::format::fsync_dir(dir)?;
             }
             return Ok(());
         }
@@ -216,16 +220,23 @@ impl Quarantine {
         bytes.push(QUARANTINE_VERSION);
         bytes.extend_from_slice(&payload);
 
-        std::fs::write(&tmp, &bytes)?;
+        // Fsync the tmp file's contents BEFORE the rename so a crash can never
+        // expose a half-written quarantine under the real name.
+        {
+            let mut f = std::fs::File::create(&tmp)?;
+            f.write_all(&bytes)?;
+            f.sync_all()?;
+        }
+        // Crash after the tmp is durable but before the rename: the real
+        // quarantine file must still be the previous committed version (or
+        // absent) on reopen — never a torn half-write. Compiles to nothing
+        // outside test builds.
+        super::format::maybe_crash("quarantine_pre_rename");
         std::fs::rename(&tmp, &path)?;
 
-        // Best-effort directory fsync on unix for durability.
-        #[cfg(unix)]
-        {
-            if let Ok(dir_file) = std::fs::File::open(dir) {
-                let _ = dir_file.sync_all();
-            }
-        }
+        // Fsync the directory so the rename itself is durable. Propagate any
+        // failure rather than silently discarding it.
+        super::format::fsync_dir(dir)?;
 
         Ok(())
     }

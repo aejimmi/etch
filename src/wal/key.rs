@@ -134,6 +134,13 @@ impl EtchKey for IpAddr {
 // Tuple key impl
 // ---------------------------------------------------------------------------
 
+/// Tuple key encoding: `len(A) as u64 LE` ++ `A bytes` ++ `B bytes`.
+///
+/// This encoding is **round-trip only** — `from_bytes(to_bytes(k)) == k` — but
+/// it is NOT sort-order preserving. The little-endian length prefix and the
+/// little-endian integer component encodings mean the lexicographic ordering
+/// of encoded tuple bytes does not match the tuple's `Ord`. Do not rely on
+/// encoded key bytes for range scans or ordered iteration.
 impl<A: EtchKey, B: EtchKey> EtchKey for (A, B) {
     fn to_bytes(&self) -> Vec<u8> {
         let a = self.0.to_bytes();
@@ -155,19 +162,32 @@ impl<A: EtchKey, B: EtchKey> EtchKey for (A, B) {
                 ),
             });
         }
-        let a_len = u64::from_le_bytes(bytes[..8].try_into().unwrap()) as usize;
-        if bytes.len() < 8 + a_len {
-            return Err(crate::Error::WalCorrupted {
-                offset: 0,
-                reason: format!(
-                    "tuple key truncated: {} bytes, need {}",
-                    bytes.len(),
-                    8 + a_len
-                ),
-            });
-        }
-        let a = A::from_bytes(&bytes[8..8 + a_len])?;
-        let b = B::from_bytes(&bytes[8 + a_len..])?;
+        let len_prefix: [u8; 8] =
+            bytes[..8]
+                .try_into()
+                .map_err(|_| crate::Error::WalCorrupted {
+                    offset: 0,
+                    reason: "tuple key length prefix truncated".into(),
+                })?;
+        let a_len = u64::from_le_bytes(len_prefix) as usize;
+        // `8 + a_len` can overflow `usize` for a crafted/corrupted length
+        // prefix (e.g. all-0xFF), which panics in debug builds. Use a checked
+        // add so malformed bytes surface as a typed error, never a panic.
+        let end = match 8usize.checked_add(a_len) {
+            Some(end) if end <= bytes.len() => end,
+            _ => {
+                return Err(crate::Error::WalCorrupted {
+                    offset: 0,
+                    reason: format!(
+                        "tuple key truncated: {} bytes, need {}",
+                        bytes.len(),
+                        (a_len as u64).saturating_add(8)
+                    ),
+                });
+            }
+        };
+        let a = A::from_bytes(&bytes[8..end])?;
+        let b = B::from_bytes(&bytes[end..])?;
         Ok((a, b))
     }
 }

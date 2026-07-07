@@ -11,6 +11,7 @@ use super::diff::encode_versioned_value;
 use super::key::EtchKey;
 use super::op::Op;
 use super::overlay::{MapRead, Overlay};
+use crate::error::Result;
 
 /// A per-collection transaction handle.
 ///
@@ -52,15 +53,20 @@ where
     }
 
     /// Insert or update a key-value pair.
-    pub fn put(&mut self, key: K, value: V) {
-        let encoded =
-            encode_versioned_value(self.schema_version, &value).expect("versioned encode");
+    ///
+    /// Serializes `value` into a versioned WAL envelope. Returns
+    /// [`crate::Error`] if serialization fails (e.g. a `Serialize` impl that
+    /// errors) instead of panicking, so the enclosing `write` closure can
+    /// propagate the failure with `?` into [`crate::Store::write`]'s `Result`.
+    pub fn put(&mut self, key: K, value: V) -> Result<()> {
+        let encoded = encode_versioned_value(self.schema_version, &value)?;
         self.ops.push(Op::Put {
             collection: self.collection_id,
             key: key.to_bytes(),
             value: encoded,
         });
         self.overlay.put(key, value);
+        Ok(())
     }
 
     /// Delete a key. Returns true if the key existed.

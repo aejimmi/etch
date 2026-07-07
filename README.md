@@ -3,8 +3,8 @@
 </p>
 
 <p align="center">
-  <img src="https://img.shields.io/badge/tests-169_passed-brightgreen" alt="tests" />
-  <img src="https://img.shields.io/badge/coverage-95.6%25-brightgreen" alt="coverage" />
+  <img src="https://github.com/tell-rs/etch/actions/workflows/ci.yml/badge.svg" alt="CI" />
+  <img src="https://img.shields.io/badge/tests-307_passed-brightgreen" alt="tests" />
   <img src="https://img.shields.io/badge/license-MIT-blue" alt="license" />
   <img src="https://img.shields.io/badge/rust-2024_edition-orange?logo=rust" alt="rust edition" />
 </p>
@@ -40,7 +40,7 @@ Or add to your `Cargo.toml`:
 
 ```toml
 [dependencies]
-etchdb = "0.4"
+etchdb = "0.5"
 ```
 
 ## Quick start
@@ -70,8 +70,8 @@ let store = Store::<Music, WalBackend<Music>>::open_wal("data/".into()).unwrap()
 
 // Write — tx.artists is a Collection with typed get/put/delete
 store.write(|tx| {
-    tx.artists.put("radiohead".into(), Artist { name: "Radiohead".into(), genre: "alt rock".into() });
-    tx.artists.put("coltrane".into(), Artist { name: "John Coltrane".into(), genre: "jazz".into() });
+    tx.artists.put("radiohead".into(), Artist { name: "Radiohead".into(), genre: "alt rock".into() })?;
+    tx.artists.put("coltrane".into(), Artist { name: "John Coltrane".into(), genre: "jazz".into() })?;
     Ok(())
 }).unwrap();
 
@@ -99,7 +99,9 @@ cargo run --example contacts
 - **Derive macros** — `#[derive(Replayable, Transactable)]` eliminates ~60 lines of boilerplate per state type
 - **Schema migrations** — single-hop migration functions compose into chains, per-value version tags drive dispatch, each migration runs inside `catch_unwind`
 - **Quarantine** — values that can't migrate are preserved with a reason; `retry_quarantine()` drains them once you ship the missing migration
-- **Schema drift warning** — fingerprints `(collection, version)` pairs and warns on load when they change without a matching migration
+- **Schema drift detection** — a shape-aware fingerprint (collection, version, key/value types) flags loads where the schema changed without a matching migration
+- **Load reports** — `ReplayReport` counts everything a load skipped, quarantined, or discarded; `open_wal_strict` fails hard on any loss instead
+- **Deadlock detection** — writes return `Error::LockTimeout` instead of hanging forever when the state lock is starved; the 30s budget is tunable
 - **Exclusive lock** — a second process opening the same directory gets `DatabaseLocked` with the holder's PID
 - **Async support** — `AsyncStore::open_wal` + async `write`/`flush` for tokio runtimes via `block_in_place`
 - **Snapshot compaction** — WAL auto-compacts after a configurable threshold, with optional zstd compression (`compression` feature)
@@ -107,7 +109,30 @@ cargo run --example contacts
 - **Zero-clone writes** — `Overlay` + `Transactable` captures changes without cloning state
 - **BTreeMap and HashMap** — generic key types (`String`, `Vec<u8>`, integers, IP addresses, tuples) via `EtchKey` trait
 - **Pluggable backends** — `WalBackend`, `NullBackend`, or bring your own
-- **Corruption recovery** — truncates incomplete WAL entries, keeps valid prefix
+- **Corruption recovery** — truncates incomplete WAL entries, keeps valid prefix, and reports what was dropped
+
+## Crash safety
+
+Acknowledged writes survive crashes. Durable writes fsync before returning, compaction orders the snapshot rename between file and directory fsyncs so no crash window loses the WAL, and a torn tail from a mid-write crash is truncated on the next load — with the live writer repositioned so later appends can't corrupt the file. A crash-injection harness (child processes aborted at deterministic points mid-compaction) backs these guarantees in the test suite.
+
+When a load does skip something, it's never silent:
+
+```rust
+// Lenient (default): load what's recoverable, report the rest
+let store = Store::<Music, WalBackend<Music>>::open_wal("data/".into()).unwrap();
+let report = store.replay_report();
+if report.has_loss() {
+    println!("{}", report.summary());
+}
+
+// Or get the report alongside the store
+let (store, report) = Store::<Music, WalBackend<Music>>::open_wal_with_report("data/".into()).unwrap();
+
+// Or refuse to open past any data loss
+let store = Store::<Music, WalBackend<Music>>::open_wal_strict("data/".into()).unwrap();
+```
+
+`ReplayReport` carries exact counts per anomaly class — undecodable values, unknown collections, quarantined migrations, snapshot status, schema drift. `open_wal_strict` turns any of them into `Error::ReplayLoss`.
 
 ## Performance
 

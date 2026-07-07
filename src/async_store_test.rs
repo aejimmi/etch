@@ -142,7 +142,7 @@ async fn async_concurrent_writes() {
         let s = store.clone();
         handles.push(tokio::spawn(async move {
             for i in 0..10 {
-                s.write(|tx| {
+                s.write(move |tx| {
                     tx.insert(&format!("t{t}_k{i}"), &format!("v{i}"));
                     Ok(())
                 })

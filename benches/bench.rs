@@ -297,7 +297,7 @@ fn main() -> etchdb::Result<()> {
         // apply_op_bytes — no conversion
         let mut bmap: BTreeMap<Vec<u8>, String> = BTreeMap::new();
         bench("apply_op_bytes (no conversion)", n, || {
-            etchdb::apply_op_bytes(&mut bmap, &op).unwrap();
+            etchdb::wal::apply_op_bytes(&mut bmap, &op).unwrap();
         });
     }
 
@@ -455,7 +455,7 @@ fn main() -> etchdb::Result<()> {
         let async_store = AsyncStore::from_store(Store::<State>::memory());
         rt.block_on(async {
             async_store
-                .write(|tx| {
+                .write(move |tx| {
                     for i in 0..seed_size {
                         tx.insert(make_user(i));
                     }
@@ -478,12 +478,15 @@ fn main() -> etchdb::Result<()> {
         });
 
         let mut ai = seed_size + 200_000;
-        bench("async write (block_in_place)", n, || {
+        bench("async write (spawn_blocking)", n, || {
+            // The write closure crosses onto the blocking pool, so it must own
+            // its captures: snapshot the counter, then advance it outside.
+            let cur = ai;
+            ai += 1;
             rt.block_on(async {
                 async_store
-                    .write(|tx| {
-                        tx.insert(make_user(ai));
-                        ai += 1;
+                    .write(move |tx| {
+                        tx.insert(make_user(cur));
                         Ok(())
                     })
                     .await

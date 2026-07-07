@@ -73,6 +73,16 @@ impl WalFile {
 
         self.writer.write_all(&len.to_le_bytes())?;
         self.writer.write_all(&payload)?;
+        #[cfg(test)]
+        if crash_armed("wal_torn_entry") {
+            // Model power loss mid-append: flush the buffered len+payload to
+            // disk WITHOUT the trailing hash, then abort. The result is a torn
+            // entry the next boot must reject (hash region missing), never
+            // replay as valid. Compiles to nothing outside test builds.
+            let _ = self.writer.flush();
+            let _ = self.writer.get_ref().sync_all();
+            std::process::abort();
+        }
         self.writer.write_all(&hash.to_le_bytes())?;
         self.offset += 4 + payload.len() as u64 + 8;
         Ok(())
@@ -82,6 +92,10 @@ impl WalFile {
     pub fn sync(&mut self) -> Result<()> {
         self.writer.flush()?;
         self.writer.get_ref().sync_all()?;
+        // Durability boundary: the bytes are fsync'd. A crash here (after the
+        // OS has the data, before the caller's write returns) must still
+        // recover this write on the next boot.
+        maybe_crash("post_wal_sync");
         Ok(())
     }
 
@@ -155,10 +169,35 @@ impl WalFile {
     }
 
     /// Truncate the WAL file at the given offset (for corruption recovery).
+    ///
+    /// Operates through an independent handle. Use this only when no live
+    /// [`WalFile`] handle is open on `path`; if one is, use
+    /// [`WalFile::truncate_to`] instead so the writer is repositioned.
+    /// Now only used by tests — production recovery goes through
+    /// [`WalFile::truncate_to`] on the live handle.
+    #[cfg(test)]
     pub fn truncate_at(path: &Path, offset: u64) -> Result<()> {
         let file = OpenOptions::new().write(true).open(path)?;
         file.set_len(offset)?;
         file.sync_all()?;
+        Ok(())
+    }
+
+    /// Truncate this open WAL to `offset` and reposition the writer so the
+    /// next [`append`](Self::append) lands exactly at the new end.
+    ///
+    /// Unlike the static [`truncate_at`](Self::truncate_at), this repositions
+    /// the live `BufWriter`. `truncate_at` shrinks the file through a separate
+    /// handle and leaves this writer seeked to the old (larger) end — the next
+    /// append would then write past a zero-filled sparse hole, which the next
+    /// boot's hash check reads as corruption and truncates, silently dropping
+    /// the acknowledged write.
+    pub fn truncate_to(&mut self, offset: u64) -> Result<()> {
+        self.writer.flush()?;
+        self.writer.get_ref().set_len(offset)?;
+        self.writer.get_ref().sync_all()?;
+        self.writer.seek(SeekFrom::Start(offset))?;
+        self.offset = offset;
         Ok(())
     }
 
@@ -181,7 +220,9 @@ impl WalFile {
     /// the backup still holds every op that was compacted.
     ///
     /// The backup file is created atomically (overwriting any existing
-    /// backup from a prior compaction) and fsync'd before this returns.
+    /// backup from a prior compaction), fsync'd, and its parent directory
+    /// entry is made durable BEFORE the live WAL is reset — so a crash in the
+    /// compaction window can never leave `wal.prev` without a directory entry.
     pub fn rotate_to_backup(&mut self, wal_path: &Path, backup_path: &Path) -> Result<()> {
         // Flush and sync the current WAL so every op we've seen in memory
         // is on disk before we copy it.
@@ -200,6 +241,17 @@ impl WalFile {
             std::io::copy(&mut src, &mut dst)?;
             dst.sync_all()?;
         }
+
+        // Make wal.prev's directory entry durable BEFORE truncating the live
+        // WAL. A crash after reset() but before the caller's post-rename dir
+        // fsync must still find wal.prev on disk; otherwise the old snapshot is
+        // superseded by a reset WAL and every post-snapshot op is lost. This
+        // closes the compaction crash window.
+        if let Some(parent) = backup_path.parent() {
+            fsync_dir(parent)?;
+        }
+
+        maybe_crash("post_wal_prev_dir_fsync");
 
         // Reset the live WAL (header + truncate) so new writes start fresh.
         self.reset()?;
@@ -244,7 +296,7 @@ fn validate_header(r: &mut impl Read) -> Result<()> {
     if &magic != MAGIC {
         return Err(Error::WalCorrupted {
             offset: 0,
-            reason: format!("bad magic: expected TWAL, got {:?}", magic),
+            reason: format!("bad magic: expected EWAL, got {:?}", magic),
         });
     }
 
@@ -264,4 +316,59 @@ fn validate_header(r: &mut impl Read) -> Result<()> {
     let mut skip = [0u8; 11];
     r.read_exact(&mut skip)?;
     Ok(())
+}
+
+/// Fsync a directory so recent create/rename/set_len operations on its
+/// children are durable. POSIX guarantees directory fsync; on non-unix
+/// platforms there is no portable equivalent, so this is a no-op.
+#[cfg(unix)]
+pub(crate) fn fsync_dir(dir: &Path) -> Result<()> {
+    File::open(dir)?.sync_all()?;
+    Ok(())
+}
+
+/// Non-unix stub — see the unix variant.
+#[cfg(not(unix))]
+pub(crate) fn fsync_dir(_dir: &Path) -> Result<()> {
+    Ok(())
+}
+
+/// Deterministic crash-injection point for durability tests.
+///
+/// A child process sets `ETCHDB_CRASH_POINT=<label>`; when the matching
+/// instrumentation point is reached, the process aborts WITHOUT unwinding —
+/// modelling a hard kill (SIGKILL / power loss) that runs no destructors and
+/// flushes no buffers. Compiles to nothing outside test builds.
+#[inline]
+pub(crate) fn maybe_crash(_point: &str) {
+    #[cfg(test)]
+    {
+        if crash_armed(_point) {
+            std::process::abort();
+        }
+    }
+}
+
+/// Test-only: whether crash point `point` is armed and its skip budget is
+/// exhausted.
+///
+/// `ETCHDB_CRASH_POINT` selects the point. `ETCHDB_CRASH_SKIP` (default `0`)
+/// lets the first N matching hits pass before the (N+1)th aborts — so a child
+/// can acknowledge (append + fsync) several writes and then crash on a
+/// *specific* later append/sync/save rather than the first one. With the
+/// default skip of `0` the first matching hit aborts, preserving the original
+/// single-shot behaviour. Only the currently-selected point ever increments
+/// the counter, so a child that arms one point sees a per-point hit count.
+#[cfg(test)]
+fn crash_armed(point: &str) -> bool {
+    use std::sync::atomic::{AtomicU64, Ordering};
+    static HITS: AtomicU64 = AtomicU64::new(0);
+    if std::env::var("ETCHDB_CRASH_POINT").as_deref() != Ok(point) {
+        return false;
+    }
+    let skip = std::env::var("ETCHDB_CRASH_SKIP")
+        .ok()
+        .and_then(|s| s.parse::<u64>().ok())
+        .unwrap_or(0);
+    HITS.fetch_add(1, Ordering::Relaxed) >= skip
 }

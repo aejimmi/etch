@@ -1,5 +1,34 @@
 # Changelog
 
+## v0.5.0
+
+New:
+- report: ReplayReport records everything the loader skipped, quarantined, or discarded — exact counts per anomaly class, snapshot status, schema drift, and a one-line summary(); replaces 13 eprintln! sites on the load path
+- report: Store::open_wal_with_report returns the report alongside the store; Store::replay_report() keeps the most recent load's report queryable for the store's lifetime
+- strict: Store::open_wal_strict aborts the load with Error::ReplayLoss instead of silently skipping past recoverable data loss; LoadMode selects lenient or strict at the backend level
+- lock: deadlock detector on the state lock — write() and write_durable() return Error::LockTimeout after a 30s budget (tunable via set_lock_deadlock_timeout), read() panics with call-site diagnostics instead of hanging forever
+- store: read_with() closure-scoped read access — the guard can't leak past the closure, so it can't starve writers
+- store: last_flush_error() exposes the most recent grouped-mode background flush failure without issuing a write
+- store: Immediate-mode writes now auto-compact at the snapshot threshold (previously grouped mode only)
+- derive: schema fingerprint is shape-aware — key/value type tokens feed the hash, so swapping a field's value type flips the fingerprint even without a version bump
+- test: crash-injection harness — child processes abort at deterministic points via ETCHDB_CRASH_POINT; parent asserts no acknowledged write is lost
+
+Fix:
+- wal: compaction fsyncs the directory in the correct order around the snapshot rename, closing a crash window where acknowledged writes could vanish after WAL reset
+- wal: load-time truncation of a torn tail now re-seeks the live writer — a subsequent append no longer leaves a sparse hole that the next boot read as corruption
+- wal: quarantine writes go through tmp file + fsync + rename, so a torn quarantine write can't corrupt previously preserved values
+- store: non-WAL save clones state and persists outside the lock instead of holding it across serialization and IO
+- store: grouped-mode flush failures requeue the batched ops for retry instead of dropping them; a recovered retry advances the durability watermark
+- wal: opening a directory retries the exclusive lock briefly before reporting DatabaseLocked, so closing a store and immediately reopening it no longer races the lock release under load
+- key: decoding a corrupt tuple key with an oversized length prefix returns an error instead of panicking on integer overflow
+
+Breaking:
+- collection: Collection::put now returns Result — write closures must propagate it (tx.items.put(k, v)?)
+- store: write() and write_durable() require T: Clone (backs the non-WAL persistence path and immediate-mode compaction)
+- async: AsyncStore closures require Send + 'static — work now runs on tokio's blocking pool via spawn_blocking instead of block_in_place
+- lib: 16 WAL internals moved off the crate root into etchdb::wal:: (SnapshotEntry, SnapshotPayload, CollectionSection, apply_op_with, apply_op_bytes, encode_msgpack_value, format_op_key, load_snapshot_entry, split_versioned_value, and the versioned apply_op variants)
+- load: recoverable load anomalies no longer print to stderr — consumers that watched eprintln! output must read store.replay_report() (or open with open_wal_strict to fail hard)
+
 ## v0.4.0
 
 New:
@@ -15,6 +44,12 @@ Breaking:
 - wal: format bumped from v3 to v4; legacy v3 WALs still read, new writes are v4
 - replayable: apply_with_format now required; manual trait impls must accept a ReplayFormat argument
 - deps: rmp-serde added as a required dependency
+
+## v0.3.3
+
+- workspace: repo converted to a Cargo workspace with shared [workspace.package] metadata (version, edition, license, repository)
+- derive: etchdb-derive had shipped stuck at 0.3.0 while the main crate advanced — version now workspace-inherited and pinned exactly (=0.3.3) so both crates release in lockstep
+- release: RELEASE.md added with the two-crate publish order
 
 ## v0.3.2
 

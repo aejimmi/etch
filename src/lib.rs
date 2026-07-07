@@ -102,15 +102,17 @@ pub use error::{Error, Result};
 /// the trait and the derive macro (same pattern as serde).
 pub use etchdb_derive::{Replayable, Transactable};
 pub use store::{FlushPolicy, Ref, Store};
+/// High-level API surface. The low-level WAL replay/format primitives
+/// (`apply_op_versioned_*`, `encode_*`, `split_versioned_value`,
+/// `SnapshotPayload`, …) are intentionally **not** re-exported here as of
+/// 0.5.0 — reach them through the documented [`mod@wal`] module. The derive
+/// macro emits fully-qualified `::etchdb::wal::…` paths to them, so generated
+/// code keeps working without the flat re-export.
 pub use wal::{
-    ChainResult, Collection, CollectionSection, EtchKey, IncrementalSave, MapRead, MigrationError,
+    ChainResult, Collection, EtchKey, IncrementalSave, LoadMode, MapRead, MigrationError,
     MigrationFn, MigrationSet, Op, Overlay, Quarantine, QuarantineReason, QuarantinedEntry,
-    ReplayContext, ReplayFormat, Replayable, SnapshotEntry, SnapshotPayload, Transactable,
-    WalBackend, apply_op, apply_op_bytes, apply_op_hash, apply_op_hash_bytes, apply_op_hash_with,
-    apply_op_versioned_hash_with, apply_op_versioned_hash_with_ctx, apply_op_versioned_with,
-    apply_op_versioned_with_ctx, apply_op_with, apply_overlay_btree, apply_overlay_hash,
-    encode_msgpack_value, encode_versioned_value, format_op_key, load_snapshot_entry,
-    split_versioned_value,
+    ReplayContext, ReplayFormat, ReplayReport, Replayable, SchemaDrift, SnapshotStatus,
+    Transactable, WalBackend, apply_op, apply_op_hash, apply_overlay_btree, apply_overlay_hash,
 };
 
 #[cfg(test)]
@@ -126,5 +128,13 @@ mod async_store_test;
 mod derive_test;
 
 #[cfg(test)]
+#[path = "derive_generic_test.rs"]
+mod derive_generic_test;
+
+#[cfg(test)]
 #[path = "migration_scenarios_test.rs"]
 mod migration_scenarios_test;
+
+#[cfg(test)]
+#[path = "replay_report_test.rs"]
+mod replay_report_test;

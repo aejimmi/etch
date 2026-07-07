@@ -19,6 +19,7 @@ pub mod migration;
 mod op;
 pub mod overlay;
 pub mod quarantine;
+pub mod report;
 pub mod snapshot;
 mod writer;
 
@@ -36,8 +37,9 @@ pub use migration::{ChainResult, MigrationError, MigrationFn, MigrationSet};
 pub use op::{Op, format_op_key};
 pub use overlay::{MapRead, Overlay};
 pub use quarantine::{QUARANTINE_FILE, Quarantine, QuarantineReason, QuarantinedEntry};
+pub use report::{ReplayReport, SchemaDrift, SnapshotStatus};
 pub use snapshot::{CollectionSection, SnapshotEntry, SnapshotPayload};
-pub use writer::{IncrementalSave, WalBackend};
+pub use writer::{IncrementalSave, LoadMode, WalBackend};
 
 #[cfg(test)]
 #[path = "format_test.rs"]
@@ -62,3 +64,7 @@ mod merge_test;
 #[cfg(test)]
 #[path = "key_test.rs"]
 mod key_test;
+
+#[cfg(test)]
+#[path = "fuzz_test.rs"]
+mod fuzz_test;
