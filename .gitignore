@@ -4,7 +4,7 @@
 /data
 Cargo.lock
 
-.claude/
+.claude/*
 CLAUDE.md
 AGENTS.md
 AGENTS-CONTEXT.md

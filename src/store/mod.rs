@@ -24,6 +24,7 @@
 //!   durability contract (an acknowledged write is durable only after the
 //!   next flush).
 
+mod checkpoint;
 mod flush;
 mod lock;
 mod persist;
@@ -39,9 +40,12 @@ use crate::backend::{Backend, NullBackend};
 use crate::error::{Error, Result};
 use crate::wal::{IncrementalSave, Op, ReplayReport, Replayable, WalBackend};
 
+pub use checkpoint::CheckpointReport;
 pub use flush::FlushPolicy;
 pub use lock::Ref;
-use lock::{STATE_LOCK_DEADLOCK_TIMEOUT, duration_to_us, read_or_panic, try_write_for};
+use lock::{
+    STATE_LOCK_DEADLOCK_TIMEOUT, duration_to_us, read_or_panic, try_lock_gate_for, try_write_for,
+};
 
 /// Shared state between the store and the flusher thread.
 struct FlushShared<T, B: Backend<T>> {
@@ -191,7 +195,9 @@ impl<T: Replayable + Serialize + DeserializeOwned + Default> Store<T, WalBackend
     pub fn purge_quarantine(&self) -> Result<()> {
         self.backend.purge_quarantine()
     }
+}
 
+impl<T: Replayable + Serialize + DeserializeOwned + Default + Clone> Store<T, WalBackend<T>> {
     /// Retry migration on all quarantined entries with the current
     /// `T::migrations()` registry.
     ///
@@ -200,8 +206,26 @@ impl<T: Replayable + Serialize + DeserializeOwned + Default> Store<T, WalBackend
     /// readers and will survive the next snapshot). Entries that still
     /// fail remain in quarantine.
     ///
+    /// This is a write. It takes the write gate for its whole duration and
+    /// reaches the WAL through the same route as [`Store::write_durable`], so
+    /// it is serialized against other writers, ordered correctly behind
+    /// grouped-mode pending ops, and — critically — cannot append to `wal.bin`
+    /// while [`Store::checkpoint_to`] is mid-copy on another thread.
+    ///
     /// Returns the number of entries successfully recovered.
+    ///
+    /// # Errors
+    ///
+    /// [`Error::LockTimeout`] if called from inside a write closure on the
+    /// same thread (the write gate is not reentrant), plus any error from
+    /// persisting the recovered ops.
     pub fn retry_quarantine(&self) -> Result<usize> {
+        let _gate = try_lock_gate_for(
+            &self.write_gate,
+            "retry_quarantine",
+            self.lock_deadlock_timeout(),
+        )?;
+
         let recovered_ops = self.backend.retry_quarantine()?;
         if recovered_ops.is_empty() {
             return Ok(0);
@@ -210,10 +234,21 @@ impl<T: Replayable + Serialize + DeserializeOwned + Default> Store<T, WalBackend
 
         // Append the synthetic Put ops to the WAL and apply in-memory so
         // subsequent reads see the recovered values.
-        if let Some(ref inc) = self.incremental {
-            inc.save_ops(&recovered_ops)?;
-            inc.sync()?;
+        if let Some(inc) = self.incremental.clone() {
+            self.append_durable(&inc, recovered_ops.clone())?;
         }
+        self.apply_recovered(&recovered_ops)?;
+        self.maybe_compact()?;
+        if let Some(ref shared) = self.shared {
+            Self::mark_flushed(shared);
+        }
+        Ok(n)
+    }
+
+    /// Merge recovered quarantine ops into committed state under a short
+    /// write lock. Failures here are per-op and land in a scratch quarantine —
+    /// the entries the backend already settled are authoritative.
+    fn apply_recovered(&self, ops: &[Op]) -> Result<()> {
         let migrations = T::migrations();
         let mut quarantine_scratch = crate::Quarantine::new();
         let mut ctx = crate::ReplayContext::new(
@@ -221,15 +256,12 @@ impl<T: Replayable + Serialize + DeserializeOwned + Default> Store<T, WalBackend
             &migrations,
             &mut quarantine_scratch,
         );
-        {
-            let mut state = try_write_for(
-                &self.state,
-                "retry_quarantine",
-                self.lock_deadlock_timeout(),
-            )?;
-            state.apply_with_ctx(&recovered_ops, &mut ctx)?;
-        }
-        Ok(n)
+        let mut state = try_write_for(
+            &self.state,
+            "retry_quarantine",
+            self.lock_deadlock_timeout(),
+        )?;
+        state.apply_with_ctx(ops, &mut ctx)
     }
 }
 

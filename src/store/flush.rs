@@ -211,6 +211,11 @@ fn flush_pending<T: Clone, B: Backend<T>>(shared: &FlushShared<T, B>) -> Result<
 /// Compact the WAL from the background flusher if it is over threshold.
 /// Independent of the durability watermark; records a snapshot failure into
 /// `last_error` without stalling `gen_flushed`.
+///
+/// Goes through `compact_if_needed` rather than a bare `should_snapshot()` +
+/// `snapshot()` pair so it cannot interleave with a foreground compaction
+/// started by `write_durable` on another thread: the threshold re-check and
+/// the state clone both happen inside the backend's compaction exclusion.
 fn maybe_compact_bg<T: Clone, B: Backend<T>>(shared: &FlushShared<T, B>) {
     let Some(ref inc) = shared.incremental else {
         return;
@@ -218,8 +223,8 @@ fn maybe_compact_bg<T: Clone, B: Backend<T>>(shared: &FlushShared<T, B>) {
     if !inc.should_snapshot() {
         return;
     }
-    let snapshot = shared.state.read().clone();
-    if let Err(e) = inc.snapshot(&snapshot) {
+    let mut state_fn = || -> Result<T> { Ok(shared.state.read().clone()) };
+    if let Err(e) = inc.compact_if_needed(&mut state_fn) {
         *shared.last_error.lock() = Some(e);
     }
 }

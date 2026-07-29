@@ -214,10 +214,14 @@ impl WalFile {
 
     /// Copy current WAL contents to `backup_path`, then reset self to empty.
     ///
-    /// Used at compaction: preserves a recoverable copy of the pre-compaction
-    /// WAL (as `wal.prev`) before the new snapshot supersedes it. If the
-    /// snapshot write crashes or the new snapshot turns out to be unreadable,
-    /// the backup still holds every op that was compacted.
+    /// Used at compaction, *after* the new snapshot has been renamed into
+    /// place and the directory fsync'd. Two things follow from that ordering:
+    ///
+    /// - Overwriting the previous generation's `wal.prev` is safe, because the
+    ///   snapshot just committed contains its ops.
+    /// - Any op that reached `wal.bin` after the snapshot's state was captured
+    ///   is preserved here before `wal.bin` is reset, and stays preserved until
+    ///   the *next* compaction commits a snapshot that contains it.
     ///
     /// The backup file is created atomically (overwriting any existing
     /// backup from a prior compaction), fsync'd, and its parent directory

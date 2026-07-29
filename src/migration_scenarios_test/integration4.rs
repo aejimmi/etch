@@ -20,8 +20,13 @@ mod integration_wal_prev_safety_net {
         dir.join("wal.prev").exists()
     }
 
+    /// A boot must NOT delete `wal.prev`. The backup can hold ops the
+    /// committed snapshot does not — the snapshot is encoded from a state
+    /// captured before the rotation — so dropping it on the strength of
+    /// "we replayed it into memory" makes the durable state a subset of the
+    /// acknowledged one. Only the next compaction supersedes it.
     #[test]
-    fn wal_prev_created_on_compaction_deleted_on_next_boot() {
+    fn wal_prev_created_on_compaction_survives_next_boot() {
         let dir = tempfile::tempdir().unwrap();
         let state_dir = dir.path().to_path_buf();
 
@@ -49,8 +54,8 @@ mod integration_wal_prev_safety_net {
             assert_eq!(state.items.get("b").map(|v| v.n), Some(2));
             drop(state);
             assert!(
-                !wal_prev_exists(&state_dir),
-                "wal.prev removed after successful boot"
+                wal_prev_exists(&state_dir),
+                "wal.prev must outlive a boot — only a committed snapshot supersedes it"
             );
         }
     }
@@ -99,9 +104,19 @@ mod integration_wal_prev_safety_net {
             Some(42),
             "wal.prev replay recovers pre-compaction data"
         );
+        drop(store);
         assert!(
-            !wal_prev_exists(&state_dir),
-            "wal.prev cleaned up on successful boot"
+            wal_prev_exists(&state_dir),
+            "wal.prev is the only durable copy of these ops — a boot must keep it"
+        );
+
+        // The second crash: kill right after the boot, before any compaction.
+        // Everything acknowledged before the first crash must still be there.
+        let store = Store::<State, WalBackend<State>>::open_wal(state_dir.clone()).unwrap();
+        assert_eq!(
+            store.read().items.get("precompact").map(|v| v.n),
+            Some(42),
+            "a boot that deletes wal.prev loses these ops on the next crash"
         );
     }
 
@@ -132,7 +147,16 @@ mod integration_wal_prev_safety_net {
         assert_eq!(state.items.get("beta").map(|v| v.n), Some(20));
         assert_eq!(state.items.len(), 2);
         drop(state);
-        assert!(!wal_prev_exists(&state_dir));
+        drop(store);
+        assert!(
+            wal_prev_exists(&state_dir),
+            "the backup is retained across boots, and replaying it stays idempotent"
+        );
+
+        // Repeat: a second boot replays the same backup and still lands on
+        // exactly two items.
+        let store = Store::<State, WalBackend<State>>::open_wal(state_dir.clone()).unwrap();
+        assert_eq!(store.read().items.len(), 2);
     }
 
     /// Corrupt snapshot + valid wal.prev: the key recovery case. Snapshot

@@ -14,6 +14,8 @@
 
 use std::collections::BTreeMap;
 
+use serde::{Deserialize, Serialize};
+
 use crate::error::Error;
 
 /// Upper bound on stored human-readable notes. Counts are always exact; only
@@ -23,7 +25,7 @@ use crate::error::Error;
 const MAX_NOTES: usize = 256;
 
 /// Status of the snapshot file observed during a load.
-#[derive(Debug, Clone, PartialEq, Eq, Default)]
+#[derive(Debug, Clone, PartialEq, Eq, Default, Serialize, Deserialize)]
 pub enum SnapshotStatus {
     /// No snapshot file existed (or it was empty); load began from default state.
     #[default]
@@ -46,7 +48,7 @@ pub enum SnapshotStatus {
 /// is bumped with a migration. It never aborts a load on its own (not even
 /// in strict mode); real data loss surfaces independently as skips or
 /// quarantine. See [`crate::Replayable::schema_fingerprint`].
-#[derive(Debug, Clone, PartialEq, Eq, Default)]
+#[derive(Debug, Clone, PartialEq, Eq, Default, Serialize, Deserialize)]
 pub enum SchemaDrift {
     /// Not evaluated — no decodable snapshot, or one side opted out (fp `0`).
     #[default]
@@ -68,9 +70,15 @@ pub enum SchemaDrift {
 /// A structured account of a single load's replay outcomes.
 ///
 /// Obtain one from [`crate::Store::replay_report`] (the report from the most
-/// recent open) or [`crate::Store::open_wal_with_report`]. Counts are exact;
-/// the free-form [`ReplayReport::notes`] are a bounded diagnostic sample.
-#[derive(Debug, Clone, Default)]
+/// recent open), [`crate::Store::open_wal_with_report`], or
+/// [`crate::WalBackend::inspect`]. Counts are exact; the free-form
+/// [`ReplayReport::notes`] are a bounded diagnostic sample.
+///
+/// The report is `Serialize`/`Deserialize` so a health check that inspects a
+/// store in one process can hand its verdict to another — a supervisor, a
+/// log pipeline, or an operator's terminal — without a hand-rolled mirror
+/// type. It carries counts and diagnostics only, never row bytes.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[must_use]
 pub struct ReplayReport {
     applied_entries: u64,

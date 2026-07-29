@@ -10,6 +10,10 @@ use crate::backend::Backend;
 
 #[path = "writer_backend_test.rs"]
 mod backend;
+#[path = "writer_compaction_test.rs"]
+mod compaction;
+#[path = "writer_inspect_test.rs"]
+mod inspect;
 #[path = "writer_snapshot_test.rs"]
 mod snapshot;
 

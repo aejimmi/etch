@@ -116,6 +116,27 @@ impl MigrationSet {
         self.entries.contains_key(&(collection, from_version))
     }
 
+    /// Iterate the registered `(collection, from_version, to_version)` hops.
+    ///
+    /// Every migration is single-hop, so `to_version == from_version + 1`.
+    /// Order is unspecified (the registry is a hash map); sort the result if
+    /// you need determinism.
+    ///
+    /// Use this to hold a schema-evolution test honest — enumerate what the
+    /// binary registers and require a fixture per hop, so a migration added
+    /// without a test fails the build rather than the next production boot:
+    ///
+    /// ```ignore
+    /// for (collection, from, to) in State::migrations().hops() {
+    ///     assert!(fixture_exists(collection, from), "no fixture for {collection}: {from}->{to}");
+    /// }
+    /// ```
+    pub fn hops(&self) -> impl Iterator<Item = (u8, u16, u16)> + '_ {
+        self.entries
+            .keys()
+            .map(|&(collection, from)| (collection, from, from.saturating_add(1)))
+    }
+
     /// Returns true if at least one migration is registered.
     pub fn is_nonempty(&self) -> bool {
         !self.entries.is_empty()

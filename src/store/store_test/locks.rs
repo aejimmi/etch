@@ -116,6 +116,38 @@ fn write_in_write_returns_lock_timeout_not_hang() {
     );
 }
 
+/// `retry_quarantine` is a write, and takes the write gate for its whole
+/// duration.
+///
+/// Proving that directly is awkward — the gate is private and the method is
+/// usually a no-op — so this leans on the gate being non-reentrant: calling
+/// `retry_quarantine` from inside a `write()` closure on the same thread must
+/// time out on the gate rather than sail through and append to `wal.bin`.
+/// Before the fix it took no gate at all and returned `Ok(0)` here, which is
+/// exactly what let it append into a concurrent `checkpoint_to`'s copy window.
+#[test]
+fn retry_quarantine_in_write_returns_lock_timeout_not_ok() {
+    let dir = tempfile::TempDir::new().unwrap();
+    let store: Arc<WalStore> = Arc::new(Store::open_wal(dir.path().to_path_buf()).unwrap());
+    store.set_lock_deadlock_timeout(Duration::from_millis(100));
+
+    let inner = Arc::clone(&store);
+    let started = std::time::Instant::now();
+    let result = store.write(|tx| {
+        tx.insert("outer", "1");
+        inner.retry_quarantine()
+    });
+
+    assert!(
+        matches!(result, Err(Error::LockTimeout { site, .. }) if site == "retry_quarantine"),
+        "retry_quarantine must contend on the write gate, got {result:?}"
+    );
+    assert!(
+        started.elapsed() < Duration::from_secs(5),
+        "must fail fast at the budget, not hang"
+    );
+}
+
 /// `set_lock_deadlock_timeout` takes effect on the next `read()`:
 /// lowering the budget makes a contended read panic near the configured
 /// value instead of the default 30 s. Reaches into the private `state`

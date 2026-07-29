@@ -135,3 +135,49 @@ fn has_reports_registration_correctly() {
 fn multi_hop_registration_panics() {
     MigrationSet::new().add(0, 1, 3, |b| Ok(b.to_vec()));
 }
+
+// -------------------------------------------------------------------------
+// hops() — enumerate what is registered
+// -------------------------------------------------------------------------
+
+/// `hops()` yields one triple per registered migration, each a single hop
+/// that `has()` agrees with.
+#[test]
+fn hops_enumerates_every_registered_migration() {
+    let set = MigrationSet::new()
+        .add(0, 1, 2, |b| Ok(b.to_vec()))
+        .add(0, 2, 3, |b| Ok(b.to_vec()))
+        .add(3, 0, 1, |b| Ok(b.to_vec()));
+
+    let mut hops: Vec<(u8, u16, u16)> = set.hops().collect();
+    hops.sort_unstable();
+
+    assert_eq!(set.hops().count(), set.len());
+    assert_eq!(hops, vec![(0, 1, 2), (0, 2, 3), (3, 0, 1)]);
+    for (collection, from, to) in hops {
+        assert!(
+            set.has(collection, from),
+            "hops() yielded ({collection}, {from}) which has() does not know"
+        );
+        assert_eq!(to, from + 1, "migrations are single-hop");
+    }
+}
+
+/// An empty registry yields nothing.
+#[test]
+fn hops_is_empty_for_an_empty_registry() {
+    let set = MigrationSet::new();
+    assert_eq!(set.hops().count(), 0);
+    assert_eq!(set.hops().count(), set.len());
+}
+
+/// Re-registering the same hop replaces it — `hops()` reports the map, not
+/// the call history.
+#[test]
+fn hops_does_not_double_count_a_replaced_migration() {
+    let set = MigrationSet::new()
+        .add(0, 1, 2, |b| Ok(b.to_vec()))
+        .add(0, 1, 2, |b| Ok(b.to_vec()));
+    assert_eq!(set.len(), 1);
+    assert_eq!(set.hops().collect::<Vec<_>>(), vec![(0, 1, 2)]);
+}

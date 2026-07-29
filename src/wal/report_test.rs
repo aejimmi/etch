@@ -150,3 +150,100 @@ fn test_summary_mentions_active_skip_classes() {
     assert!(s.contains("2 quarantined"), "got: {s}");
     assert!(s.contains("value-decode"), "got: {s}");
 }
+
+// -------------------------------------------------------------------------
+// Serialization — a report must be able to cross a process boundary
+// -------------------------------------------------------------------------
+
+/// Every public counter survives a JSON round-trip, so a health check that
+/// inspects a store in one process can hand its verdict to another without a
+/// hand-rolled mirror type.
+#[test]
+fn test_report_round_trips_through_json() {
+    let mut r = ReplayReport::default();
+    r.record_applied_entry();
+    r.record_applied_op();
+    r.record_applied_op();
+    r.record_value_decode();
+    r.record_key_decode();
+    r.record_unknown_collection(7);
+    r.record_entry_decode("bad entry");
+    r.record_wal_prev_unreadable("torn prev");
+    r.set_snapshot(SnapshotStatus::Discarded {
+        reason: "bad envelope".into(),
+    });
+    r.set_drift(SchemaDrift::Detected {
+        stored: 11,
+        current: 12,
+        has_migrations: true,
+    });
+    r.set_quarantine(
+        2,
+        std::collections::BTreeMap::from([("MissingMigration collection 0 1->2".to_string(), 2)]),
+    );
+
+    let json = serde_json::to_string(&r).expect("report must serialize");
+    let back: ReplayReport = serde_json::from_str(&json).expect("report must deserialize");
+
+    assert_eq!(back, r, "round-trip changed the report");
+    assert_eq!(back.applied_entries(), 1);
+    assert_eq!(back.applied_ops(), 2);
+    assert_eq!(back.value_decode_skipped(), 1);
+    assert_eq!(back.key_decode_skipped(), 1);
+    assert_eq!(back.unknown_collection_skipped(), 1);
+    assert_eq!(back.unknown_collections().get(&7), Some(&1));
+    assert_eq!(back.entry_decode_skipped(), 1);
+    assert_eq!(back.wal_prev_unreadable(), 1);
+    assert_eq!(back.quarantined(), 2);
+    assert_eq!(back.quarantine_by_reason().len(), 1);
+    assert_eq!(back.notes().len(), r.notes().len());
+    assert!(back.has_loss());
+    assert_eq!(back.summary(), r.summary());
+}
+
+/// Every public counter is present as a field in the serialized output — a
+/// consumer reading the JSON directly sees the whole account.
+#[test]
+fn test_report_json_carries_every_counter() {
+    let value = serde_json::to_value(ReplayReport::default()).unwrap();
+    let object = value.as_object().expect("report serializes as an object");
+    for field in [
+        "applied_entries",
+        "applied_ops",
+        "value_decode_skipped",
+        "key_decode_skipped",
+        "entry_decode_skipped",
+        "wal_prev_unreadable",
+        "unknown_collections",
+        "quarantined",
+        "quarantine_by_reason",
+        "snapshot",
+        "drift",
+        "notes",
+    ] {
+        assert!(
+            object.contains_key(field),
+            "missing field {field} in {value}"
+        );
+    }
+}
+
+/// The nested verdict enums serialize on their own too — a consumer may want
+/// only the snapshot status.
+#[test]
+fn test_snapshot_status_and_drift_serialize() {
+    let status = SnapshotStatus::Discarded {
+        reason: "torn".into(),
+    };
+    let back: SnapshotStatus =
+        serde_json::from_str(&serde_json::to_string(&status).unwrap()).unwrap();
+    assert_eq!(back, status);
+
+    let drift = SchemaDrift::Detected {
+        stored: 1,
+        current: 2,
+        has_migrations: false,
+    };
+    let back: SchemaDrift = serde_json::from_str(&serde_json::to_string(&drift).unwrap()).unwrap();
+    assert_eq!(back, drift);
+}

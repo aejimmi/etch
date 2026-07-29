@@ -101,7 +101,7 @@ pub use error::{Error, Result};
 /// Re-export derive macros so users can `use etchdb::{Replayable, Transactable}` for both
 /// the trait and the derive macro (same pattern as serde).
 pub use etchdb_derive::{Replayable, Transactable};
-pub use store::{FlushPolicy, Ref, Store};
+pub use store::{CheckpointReport, FlushPolicy, Ref, Store};
 /// High-level API surface. The low-level WAL replay/format primitives
 /// (`apply_op_versioned_*`, `encode_*`, `split_versioned_value`,
 /// `SnapshotPayload`, …) are intentionally **not** re-exported here as of

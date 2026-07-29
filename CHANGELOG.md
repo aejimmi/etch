@@ -1,5 +1,22 @@
 # Changelog
 
+## v0.6.0
+
+The backup release: copy a live store safely, and prove the copy is whole before you need it.
+
+New:
+- checkpoint: Store::checkpoint_to writes a consistent copy of a live store — blocks writes and compaction during the copy, so no acknowledged write is missing (a plain cp races compaction and can silently lose everything since the last snapshot)
+- checkpoint: returns a CheckpointReport — files, bytes, whether a snapshot was forced, elapsed; metadata only, safe to log
+- inspect: WalBackend::inspect replays a store directory without writing a byte to it and returns the same ReplayReport a real open would — verify a checkpoint or backup before you need it
+- report: ReplayReport and CheckpointReport are serde-serializable, so a health check can hand its verdict to a supervisor or log pipeline
+- migration: MigrationSet::hops() enumerates registered migrations, so tests can require a fixture per hop
+
+Fix:
+- wal: compaction commits the new snapshot before rotating the WAL — the old order had a crash window where a generation of acknowledged ops existed nowhere on disk
+- wal: load no longer deletes wal.prev after replay; only the next committed snapshot supersedes it
+- wal: foreground and background compaction share one exclusion — no more interleaved temp snapshots or double rotation
+- store: retry_quarantine is a real write — gated, durable, ordered behind pending ops, so it can't race a checkpoint or vanish on crash
+
 ## v0.5.0
 
 New:

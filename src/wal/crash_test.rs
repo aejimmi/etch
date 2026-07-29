@@ -97,13 +97,21 @@ fn test_append_after_load_truncation_survives_reopen() {
 /// Number of acknowledged (fsync'd) writes each child performs.
 const ACK_COUNT: usize = 24;
 
-/// Deterministic crash points inside `write_snapshot`/`rotate_to_backup`,
-/// straddling the compaction window between wal.prev creation and the
-/// snapshot rename.
+/// Deterministic crash points inside `write_snapshot`/`rotate_to_backup`, one
+/// per phase of a compaction. A compaction commits the snapshot first and
+/// rotates the WAL second, so the windows are:
+///
+/// 1. temp snapshot fsync'd, not yet renamed — old snapshot + full WAL;
+/// 2. renamed, directory not yet fsync'd;
+/// 3. snapshot committed, WAL not yet rotated — new snapshot + full WAL;
+/// 4. wal.prev durable, live WAL not yet reset — both copies present;
+/// 5. live WAL reset — new snapshot + wal.prev.
 const CRASH_POINTS: &[&str] = &[
-    "post_wal_prev_dir_fsync",   // wal.prev durable, before live WAL reset
-    "post_reset_pre_rename",     // live WAL reset, before snapshot rename (bug #1)
-    "post_rename_pre_dir_fsync", // snapshot renamed, before final dir fsync
+    "post_snapshot_tmp_fsync",         // (1) temp durable, before rename
+    "post_rename_pre_dir_fsync",       // (2) renamed, before dir fsync
+    "post_snapshot_commit_pre_rotate", // (3) snapshot committed, before rotate
+    "post_wal_prev_dir_fsync",         // (4) wal.prev durable, before WAL reset
+    "post_wal_reset",                  // (5) live WAL reset
 ];
 
 /// libtest filter name for [`crash_child_worker`], derived from the current
@@ -152,41 +160,135 @@ fn crash_child_worker() {
     std::process::exit(0);
 }
 
+/// Spawn a child at the given crash point and assert it aborted.
+fn spawn_crashing_child(dir: &std::path::Path, point: &str) {
+    let exe = std::env::current_exe().unwrap();
+    let status = std::process::Command::new(&exe)
+        .arg("--exact")
+        .arg(child_test_name())
+        .env("ETCHDB_CRASH_DIR", dir)
+        .env("ETCHDB_CRASH_POINT", point)
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .status()
+        .unwrap();
+    assert!(
+        !status.success(),
+        "child was expected to crash at {point} but exited cleanly"
+    );
+}
+
+/// Assert every acknowledged write is readable from `dir`.
+fn assert_all_acked_present(dir: &std::path::Path, context: &str) {
+    let backend = WalBackend::<State>::open(dir).unwrap();
+    let state = backend.load().unwrap();
+    for i in 0..ACK_COUNT {
+        let key = format!("k{i}");
+        assert_eq!(
+            state.items.get(&key).map(String::as_str),
+            Some(format!("v{i}").as_str()),
+            "key {key} lost {context}"
+        );
+    }
+}
+
 /// Spawn a child per crash point, let it die mid-compaction, then reopen the
 /// store and assert every acknowledged write survived.
 #[test]
 fn test_crash_during_compaction_preserves_acked_writes() {
-    let child = child_test_name();
-    let exe = std::env::current_exe().unwrap();
-
     for point in CRASH_POINTS {
         let dir = tempfile::tempdir().unwrap();
+        spawn_crashing_child(dir.path(), point);
+        assert_all_acked_present(dir.path(), &format!("after crash at {point}"));
+    }
+}
 
-        let status = std::process::Command::new(&exe)
-            .arg("--exact")
-            .arg(&child)
-            .env("ETCHDB_CRASH_DIR", dir.path())
-            .env("ETCHDB_CRASH_POINT", point)
-            .stdout(std::process::Stdio::null())
-            .stderr(std::process::Stdio::null())
-            .status()
-            .unwrap();
+/// Crash mid-compaction, boot, then die immediately after the boot completes
+/// and boot again. Every op acknowledged before the *first* crash must still
+/// be there.
+///
+/// This is the two-crash shape of P3: recovery used to happen only in memory
+/// (the boot replayed `wal.prev` and then deleted it), so the durable state
+/// after the first boot was the pre-compaction snapshot plus an empty WAL and
+/// the second kill lost everything the backup held. A backup is now superseded
+/// only by a committed snapshot, so the second boot recovers identically.
+#[test]
+fn test_two_crashes_around_a_boot_preserve_acked_writes() {
+    for point in CRASH_POINTS {
+        let dir = tempfile::tempdir().unwrap();
+        spawn_crashing_child(dir.path(), point);
 
-        assert!(
-            !status.success(),
-            "child was expected to crash at {point} but exited cleanly"
-        );
+        // First boot: recovers, then "dies" — the backend is dropped without
+        // writing anything, exactly like a kill right after startup.
+        assert_all_acked_present(dir.path(), &format!("on the first boot after {point}"));
 
-        // Reopen and verify durability of every acknowledged write.
-        let backend = WalBackend::<State>::open(dir.path()).unwrap();
-        let state = backend.load().unwrap();
-        for i in 0..ACK_COUNT {
-            let key = format!("k{i}");
-            assert_eq!(
-                state.items.get(&key).map(String::as_str),
-                Some(format!("v{i}").as_str()),
-                "key {key} lost after crash at {point}"
+        // Second boot: the durable state must be unchanged by the first.
+        assert_all_acked_present(dir.path(), &format!("on the second boot after {point}"));
+    }
+}
+
+// -------------------------------------------------------------------------
+// inspect() must never mutate a directory frozen mid-compaction-crash
+// -------------------------------------------------------------------------
+
+/// Content hash (raw bytes) of every regular file directly inside `dir`.
+fn dir_digest(dir: &std::path::Path) -> std::collections::BTreeMap<String, Vec<u8>> {
+    let mut out = std::collections::BTreeMap::new();
+    for entry in std::fs::read_dir(dir).unwrap() {
+        let entry = entry.unwrap();
+        if entry.file_type().unwrap().is_file() {
+            out.insert(
+                entry.file_name().to_string_lossy().into_owned(),
+                std::fs::read(entry.path()).unwrap(),
             );
         }
+    }
+    out
+}
+
+/// `inspect` must leave a directory frozen mid-compaction-crash byte
+/// identical, for every one of the five windows a compaction can be killed
+/// in — not just the two the hand-built fixtures in
+/// `writer_inspect_test.rs` construct (a torn tail, an undecodable
+/// snapshot). The regression tests above only verify content correctness
+/// via a real, mutating open (`assert_all_acked_present`); this is the
+/// non-mutating verification surface actually being non-mutating on the
+/// same crashed artifacts.
+#[test]
+fn test_inspect_after_compaction_crash_is_byte_identical() {
+    for point in CRASH_POINTS {
+        let dir = tempfile::tempdir().unwrap();
+        spawn_crashing_child(dir.path(), point);
+
+        // The crashed child's own `open()` created `.lock` before it ever
+        // reached the crash point (and a dead process leaves the file on
+        // disk, only its advisory hold releases) — so `.lock` existing here
+        // is expected. The byte-identity check below is what actually
+        // proves `inspect` did not rewrite it (or anything else).
+        let before = dir_digest(dir.path());
+        let first = WalBackend::<State>::inspect(dir.path())
+            .unwrap_or_else(|e| panic!("inspect failed after crash at {point}: {e}"));
+        let after = dir_digest(dir.path());
+        assert_eq!(
+            before, after,
+            "inspect mutated the directory after a crash at {point}"
+        );
+
+        // Repeatable...
+        let second = WalBackend::<State>::inspect(dir.path()).unwrap();
+        assert_eq!(
+            first, second,
+            "inspect was not repeatable after a crash at {point}"
+        );
+
+        // ...and agrees with what a real (mutating) open finds, once we're
+        // done asserting byte-identity and can afford to actually open it.
+        let opened = WalBackend::<State>::open(dir.path()).unwrap();
+        let (_state, opened_report) = opened.load_with_report().unwrap();
+        assert_eq!(
+            first.has_loss(),
+            opened_report.has_loss(),
+            "inspect and a real open disagree on loss after a crash at {point}"
+        );
     }
 }

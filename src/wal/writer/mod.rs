@@ -4,8 +4,12 @@
 //! Save: write full snapshot + reset WAL (used by write_durable and shutdown).
 //! IncrementalSave: append ops to WAL buffer, fsync on demand, snapshot when threshold hit.
 
+mod checkpoint;
 mod compact;
+mod inspect;
 mod load;
+mod recover;
+mod replay;
 
 use parking_lot::Mutex;
 use serde::{Serialize, de::DeserializeOwned};
@@ -15,12 +19,12 @@ use std::sync::atomic::{AtomicU64, Ordering};
 
 use super::diff::Replayable;
 use super::format::WalFile;
-use super::migration::MigrationSet;
 use super::op::Op;
 use super::quarantine::Quarantine;
 use super::report::ReplayReport;
 use crate::backend::Backend;
 use crate::error::{Error, Result};
+use crate::store::CheckpointReport;
 
 const DEFAULT_SNAPSHOT_THRESHOLD: u64 = 1000;
 
@@ -66,12 +70,24 @@ const SNAPSHOT_VERSION_MSGPACK_ZSTD: u8 = 4;
 /// attempting to open the same directory will get `Error::DatabaseLocked`.
 /// The lock releases automatically when the process exits (or the backend
 /// is dropped).
+///
+/// # Compaction exclusion
+///
+/// Snapshot writing is serialized per backend by `compact_gate`. The
+/// foreground write path, the grouped-flush background thread, an explicit
+/// [`Backend::save`], and [`crate::Store::checkpoint_to`] all funnel through
+/// it, so `snapshot.tmp` has exactly one writer and `wal.prev` is rotated by
+/// exactly one thread at a time.
 pub struct WalBackend<T: Replayable> {
     dir: PathBuf,
     /// Kept alive to hold the exclusive file lock. Dropping releases it.
     #[allow(dead_code)]
     lock_file: std::fs::File,
     wal: Mutex<WalFile>,
+    /// Serializes snapshot writing (and the checkpoint copy window) for this
+    /// backend. Never taken while the WAL mutex or the state lock is held —
+    /// the acquisition order is always `write_gate` → `compact_gate` → state.
+    compact_gate: Mutex<()>,
     entry_count: AtomicU64,
     /// WAL entries before a full snapshot is taken. Atomic so it can be
     /// retuned after construction through the `Arc<WalBackend>` the
@@ -84,7 +100,51 @@ pub struct WalBackend<T: Replayable> {
     /// next load can fold the event into its [`ReplayReport`] instead of
     /// printing it. `None` when the quarantine loaded cleanly.
     quarantine_load_note: Option<String>,
+    /// Test-only: set while a snapshot body is executing, so the exclusion
+    /// itself can be asserted rather than described in prose.
+    #[cfg(test)]
+    snapshot_in_flight: std::sync::atomic::AtomicBool,
+    /// Test-only: number of times a snapshot body was entered while another
+    /// was already in flight. Must always be zero.
+    #[cfg(test)]
+    snapshot_overlaps: AtomicU64,
+    /// Test-only: number of snapshot bodies executed (a caller that queued
+    /// behind another compaction and then found the WAL under threshold does
+    /// not increment this).
+    #[cfg(test)]
+    snapshot_writes: AtomicU64,
     _phantom: PhantomData<T>,
+}
+
+/// Test-only guard that marks a snapshot body as in flight and records any
+/// overlap. Dropping clears the flag, so an early `?` return cannot leak it.
+#[cfg(test)]
+pub(super) struct SnapshotProbe<'a> {
+    in_flight: &'a std::sync::atomic::AtomicBool,
+}
+
+#[cfg(test)]
+impl<'a> SnapshotProbe<'a> {
+    /// Mark a snapshot body as entered, counting an overlap if one was
+    /// already in flight.
+    pub(super) fn enter(
+        in_flight: &'a std::sync::atomic::AtomicBool,
+        overlaps: &AtomicU64,
+        writes: &AtomicU64,
+    ) -> Self {
+        if in_flight.swap(true, Ordering::AcqRel) {
+            overlaps.fetch_add(1, Ordering::Release);
+        }
+        writes.fetch_add(1, Ordering::Release);
+        Self { in_flight }
+    }
+}
+
+#[cfg(test)]
+impl Drop for SnapshotProbe<'_> {
+    fn drop(&mut self) {
+        self.in_flight.store(false, Ordering::Release);
+    }
 }
 
 /// Number of times [`acquire_exclusive_lock`] retries a `WouldBlock` before
@@ -163,9 +223,7 @@ impl<T: Replayable + Serialize + DeserializeOwned + Default> WalBackend<T> {
             Ok(q) => (q, None),
             Err(e) => (
                 Quarantine::new(),
-                Some(format!(
-                    "quarantine file unreadable ({e}); started with an empty quarantine"
-                )),
+                Some(replay::quarantine_unreadable_note(&e)),
             ),
         };
 
@@ -173,12 +231,32 @@ impl<T: Replayable + Serialize + DeserializeOwned + Default> WalBackend<T> {
             dir,
             lock_file,
             wal: Mutex::new(wal),
+            compact_gate: Mutex::new(()),
             entry_count: AtomicU64::new(entry_count),
             snapshot_threshold: AtomicU64::new(DEFAULT_SNAPSHOT_THRESHOLD),
             quarantine: Mutex::new(quarantine),
             quarantine_load_note,
+            #[cfg(test)]
+            snapshot_in_flight: std::sync::atomic::AtomicBool::new(false),
+            #[cfg(test)]
+            snapshot_overlaps: AtomicU64::new(0),
+            #[cfg(test)]
+            snapshot_writes: AtomicU64::new(0),
             _phantom: PhantomData,
         })
+    }
+
+    /// Test-only: how many times a snapshot body was entered concurrently
+    /// with another. The compaction exclusion makes this always zero.
+    #[cfg(test)]
+    pub(crate) fn snapshot_overlaps(&self) -> u64 {
+        self.snapshot_overlaps.load(Ordering::Acquire)
+    }
+
+    /// Test-only: how many snapshot bodies actually ran.
+    #[cfg(test)]
+    pub(crate) fn snapshot_writes(&self) -> u64 {
+        self.snapshot_writes.load(Ordering::Acquire)
     }
 
     /// Set the snapshot threshold (number of WAL entries before
@@ -201,79 +279,21 @@ impl<T: Replayable + Serialize + DeserializeOwned + Default> WalBackend<T> {
         q.save(&self.dir)
     }
 
-    /// Retry migration for all quarantined entries using the current
-    /// migration registry. Entries that migrate successfully are returned
-    /// so the caller can merge them into live state. Entries that still
-    /// fail remain in quarantine with updated reason.
-    ///
-    /// The returned `Vec<Op>` is a set of synthetic Put ops — one per
-    /// recovered entry, encoded in current-version format. Callers can
-    /// feed these to `Store::apply_ops` to merge into state.
-    pub fn retry_quarantine(&self) -> Result<Vec<Op>> {
-        let migrations = T::migrations();
-        let mut q = self.quarantine.lock();
-
-        let mut recovered = Vec::new();
-        let mut still_quarantined =
-            Vec::<super::quarantine::QuarantinedEntry>::with_capacity(q.len());
-
-        for entry in q.entries().iter().cloned() {
-            // Reconstruct the versioned envelope the decoder expects.
-            let mut envelope = Vec::with_capacity(2 + entry.value.len());
-            envelope.extend_from_slice(&entry.version.to_le_bytes());
-            envelope.extend_from_slice(&entry.value);
-
-            // We don't know the collection's V type at this layer, so we
-            // can only attempt to run the migration chain. The result is
-            // still msgpack bytes. A successful migration means the caller
-            // should be able to apply the resulting Op through the normal
-            // path on its next replay.
-            let from = entry.version;
-            let to = guess_current_version(&migrations, entry.collection, from);
-
-            if from == to || to == 0 {
-                // No forward path registered; keep the entry.
-                still_quarantined.push(entry);
-                continue;
-            }
-
-            match migrations.migrate_chain(entry.collection, from, to, &entry.value) {
-                super::migration::ChainResult::Migrated(new_bytes) => {
-                    let mut new_env = Vec::with_capacity(2 + new_bytes.len());
-                    new_env.extend_from_slice(&to.to_le_bytes());
-                    new_env.extend_from_slice(&new_bytes);
-                    recovered.push(Op::Put {
-                        collection: entry.collection,
-                        key: entry.key.clone(),
-                        value: new_env,
-                    });
-                }
-                _ => {
-                    still_quarantined.push(entry);
-                }
-            }
-        }
-
-        q.clear();
-        for entry in still_quarantined {
-            q.insert(entry);
-        }
-        q.save(&self.dir)?;
-        Ok(recovered)
-    }
-
     fn snapshot_path(&self) -> PathBuf {
-        self.dir.join("snapshot.postcard")
+        replay::snapshot_path(&self.dir)
     }
 
     fn wal_path(&self) -> PathBuf {
-        self.dir.join("wal.bin")
+        replay::wal_path(&self.dir)
     }
 
-    /// Backup WAL from the previous compaction. Preserves pre-compaction
-    /// ops until we confirm the new snapshot is loadable on the next boot.
+    /// Backup WAL from the previous compaction. Holds every op that was live
+    /// when the snapshot was taken, including any that landed after the
+    /// snapshot's state was captured. It is only ever superseded by the
+    /// *next* compaction, which rewrites it after committing a snapshot that
+    /// contains its ops — never by a load.
     fn wal_prev_path(&self) -> PathBuf {
-        self.dir.join("wal.prev")
+        replay::wal_prev_path(&self.dir)
     }
 
     /// Load state, returning the accompanying [`ReplayReport`]. Lenient:
@@ -289,21 +309,6 @@ impl<T: Replayable + Serialize + DeserializeOwned + Default> WalBackend<T> {
     pub fn load_strict(&self) -> Result<(T, ReplayReport)> {
         self.load_reporting(LoadMode::Strict)
     }
-}
-
-/// Find the highest target version reachable in a chain from `from` for
-/// `collection`. Returns `from` if no forward migration exists.
-fn guess_current_version(migrations: &MigrationSet, collection: u8, from: u16) -> u16 {
-    let mut v = from;
-    // Walk forward as long as a hop exists. Bounded by u16 range; in
-    // practice chains are short.
-    while migrations.has(collection, v) {
-        v = match v.checked_add(1) {
-            Some(next) => next,
-            None => break,
-        };
-    }
-    v
 }
 
 impl<T: Replayable + Serialize + DeserializeOwned + Default> Backend<T> for WalBackend<T> {
@@ -327,6 +332,41 @@ pub trait IncrementalSave<T>: Send + Sync {
     fn should_snapshot(&self) -> bool;
     /// Write a full snapshot and reset WAL.
     fn snapshot(&self, state: &T) -> Result<()>;
+
+    /// Compact the WAL if it is still over threshold, returning whether a
+    /// snapshot was written.
+    ///
+    /// Unlike a bare `should_snapshot()` + `snapshot()` pair, the threshold
+    /// is re-checked *and* the state to snapshot is obtained from `state_fn`
+    /// under whatever exclusion the implementation uses for compaction. That
+    /// is what stops two compaction paths (a foreground `write_durable` and
+    /// the grouped flusher) from interleaving their snapshot temp files and
+    /// their `wal.prev` rotations.
+    ///
+    /// The default implementation performs the unsynchronized check-then-act
+    /// and exists so out-of-tree implementations keep compiling.
+    fn compact_if_needed(&self, state_fn: &mut dyn FnMut() -> Result<T>) -> Result<bool> {
+        if !self.should_snapshot() {
+            return Ok(false);
+        }
+        let state = state_fn()?;
+        self.snapshot(&state)?;
+        Ok(true)
+    }
+
+    /// Write a consistent copy of the backend's on-disk state into `dest`.
+    ///
+    /// Called by [`crate::Store::checkpoint_to`] with the store's write gate
+    /// held and after a flush, so the implementation only has to exclude its
+    /// own background compaction. The default implementation reports
+    /// [`Error::CheckpointUnsupported`].
+    fn checkpoint_into(
+        &self,
+        _dest: &Path,
+        _state_fn: &mut dyn FnMut() -> Result<T>,
+    ) -> Result<CheckpointReport> {
+        Err(Error::CheckpointUnsupported)
+    }
 }
 
 impl<T: Replayable + Serialize + DeserializeOwned + Default> IncrementalSave<T> for WalBackend<T> {
@@ -365,6 +405,18 @@ impl<T: Replayable + Serialize + DeserializeOwned + Default> IncrementalSave<T> 
 
     fn snapshot(&self, state: &T) -> Result<()> {
         self.write_snapshot(state)
+    }
+
+    fn compact_if_needed(&self, state_fn: &mut dyn FnMut() -> Result<T>) -> Result<bool> {
+        self.compact_if_needed_locked(state_fn)
+    }
+
+    fn checkpoint_into(
+        &self,
+        dest: &Path,
+        state_fn: &mut dyn FnMut() -> Result<T>,
+    ) -> Result<CheckpointReport> {
+        self.checkpoint(dest, state_fn)
     }
 }
 

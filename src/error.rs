@@ -85,6 +85,33 @@ pub enum Error {
     )]
     DatabaseLocked { dir: String },
 
+    /// [`crate::Store::checkpoint_to`] was called on a store whose backend
+    /// cannot produce a consistent on-disk copy — an in-memory
+    /// [`crate::Store::memory`], a store built on a custom [`crate::Backend`],
+    /// or any backend that does not implement the checkpoint hook.
+    #[error("checkpoint is only supported on a WAL-backed store")]
+    CheckpointUnsupported,
+
+    /// The checkpoint destination already holds a store file. A checkpoint
+    /// never merges into an existing store; nothing was written.
+    #[error("checkpoint destination {dir} already contains a store file ({file})")]
+    CheckpointDestNotEmpty {
+        /// Destination directory that was rejected.
+        dir: String,
+        /// Name of the pre-existing store file that caused the rejection.
+        file: String,
+    },
+
+    /// The checkpoint destination is structurally unusable — it is the source
+    /// directory, nested inside it (or contains it), or is not a directory.
+    #[error("invalid checkpoint destination {dir}: {reason}")]
+    CheckpointDestInvalid {
+        /// Destination directory that was rejected.
+        dir: String,
+        /// Why the destination cannot be used.
+        reason: String,
+    },
+
     /// A lock acquisition exceeded the deadlock-detection budget.
     ///
     /// Returned by the `Result`-bearing write paths (`write`,

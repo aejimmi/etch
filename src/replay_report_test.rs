@@ -271,10 +271,22 @@ fn test_report_snapshot_discarded_status() {
     let report = store.replay_report();
     match report.snapshot() {
         SnapshotStatus::Discarded { reason } => {
-            assert!(reason.contains("preserved as"), "got: {reason}");
+            // The status carries why the snapshot was rejected. Where the file
+            // went is a repair the load performed, so it is a note — that
+            // split is what lets `WalBackend::inspect` report an identical
+            // status without pretending it moved anything.
+            assert!(reason.contains("snapshot envelope"), "got: {reason}");
         }
         other => panic!("expected Discarded, got {other:?}"),
     }
+    assert!(
+        report
+            .notes()
+            .iter()
+            .any(|n| n.contains("preserved as") && n.contains("snapshot.backup")),
+        "load must record where it preserved the snapshot: {:?}",
+        report.notes()
+    );
     assert!(report.has_loss());
     assert!(
         dir.path().join("snapshot.backup").exists(),
