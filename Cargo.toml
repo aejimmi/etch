@@ -2,14 +2,14 @@
 members = ["derive"]
 
 [workspace.package]
-version = "0.5.0"
+version = "0.6.0"
 edition = "2024"
 rust-version = "1.89"
 license = "MIT"
 repository = "https://github.com/tell-rs/etch"
 
 [workspace.dependencies]
-etchdb-derive = { path = "derive", version = "=0.5.0" }
+etchdb-derive = { path = "derive", version = "=0.6.0" }
 
 [package]
 name = "etchdb"
