@@ -4,7 +4,7 @@
 
 <p align="center">
   <img src="https://github.com/tell-rs/etch/actions/workflows/ci.yml/badge.svg" alt="CI" />
-  <img src="https://img.shields.io/badge/tests-307_passed-brightgreen" alt="tests" />
+  <img src="https://img.shields.io/badge/tests-372_passed-brightgreen" alt="tests" />
   <img src="https://img.shields.io/badge/license-MIT-blue" alt="license" />
   <img src="https://img.shields.io/badge/rust-2024_edition-orange?logo=rust" alt="rust edition" />
 </p>
@@ -40,7 +40,7 @@ Or add to your `Cargo.toml`:
 
 ```toml
 [dependencies]
-etchdb = "0.5"
+etchdb = "0.6"
 ```
 
 ## Quick start
@@ -101,9 +101,10 @@ cargo run --example contacts
 - **Quarantine** — values that can't migrate are preserved with a reason; `retry_quarantine()` drains them once you ship the missing migration
 - **Schema drift detection** — a shape-aware fingerprint (collection, version, key/value types) flags loads where the schema changed without a matching migration
 - **Load reports** — `ReplayReport` counts everything a load skipped, quarantined, or discarded; `open_wal_strict` fails hard on any loss instead
+- **Live checkpoints** — `checkpoint_to` copies a running store with writes and compaction held, so the copy can't miss an acknowledged write the way a plain `cp` can; `WalBackend::inspect` verifies that copy without writing to it
 - **Deadlock detection** — writes return `Error::LockTimeout` instead of hanging forever when the state lock is starved; the 30s budget is tunable
 - **Exclusive lock** — a second process opening the same directory gets `DatabaseLocked` with the holder's PID
-- **Async support** — `AsyncStore::open_wal` + async `write`/`flush` for tokio runtimes via `block_in_place`
+- **Async support** — `AsyncStore::open_wal` + async `write`/`flush` for tokio runtimes via `spawn_blocking`
 - **Snapshot compaction** — WAL auto-compacts after a configurable threshold, with optional zstd compression (`compression` feature)
 - **Two flush modes** — immediate fsync or grouped batching for throughput
 - **Zero-clone writes** — `Overlay` + `Transactable` captures changes without cloning state

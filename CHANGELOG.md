@@ -1,5 +1,9 @@
 # Changelog
 
+## v0.6.1
+
+- deps: postcard's default features are off, dropping heapless 0.7 and with it atomic-polyfill (unmaintained, RUSTSEC-2023-0089) and spin 0.9.8 (yanked) — only the alloc-based encode/decode paths were ever used, so nothing changes on disk or in the API
+
 ## v0.6.0
 
 The backup release: copy a live store safely, and prove the copy is whole before you need it.

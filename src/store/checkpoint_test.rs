@@ -157,12 +157,20 @@ fn test_checkpoint_under_write_load_keeps_every_committed_write() {
         };
 
         // Let the writer get ahead, then freeze the committed set as of now.
-        std::thread::sleep(Duration::from_millis(40));
+        //
+        // Wait on the writer's actual progress rather than a fixed sleep: the
+        // first op is durable (n = 0), so this races a single fsync, and one
+        // fsync can outlast any small constant on a loaded machine — which
+        // used to fail the emptiness check below at random.
+        let deadline = std::time::Instant::now() + Duration::from_secs(10);
+        while acked.lock().len() < 8 {
+            assert!(
+                std::time::Instant::now() < deadline,
+                "{label}: writer produced nothing to check"
+            );
+            std::thread::sleep(Duration::from_millis(2));
+        }
         let committed_before: BTreeSet<String> = acked.lock().clone();
-        assert!(
-            !committed_before.is_empty(),
-            "{label}: writer produced nothing to check"
-        );
 
         let report = store.checkpoint_to(&dest).unwrap();
 

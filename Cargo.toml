@@ -2,14 +2,14 @@
 members = ["derive"]
 
 [workspace.package]
-version = "0.6.0"
+version = "0.6.1"
 edition = "2024"
 rust-version = "1.89"
 license = "MIT"
 repository = "https://github.com/tell-rs/etch"
 
 [workspace.dependencies]
-etchdb-derive = { path = "derive", version = "=0.6.0" }
+etchdb-derive = { path = "derive", version = "=0.6.1" }
 
 [package]
 name = "etchdb"
@@ -30,7 +30,10 @@ compression = ["zstd"]
 etchdb-derive.workspace = true
 xxhash-rust = { version = "0.8", features = ["xxh3"] }
 parking_lot = "0.12"
-postcard = { version = "1", features = ["alloc"] }
+# default-features = false drops postcard's `heapless-cas` default, which pulls
+# heapless 0.7 -> atomic-polyfill (unmaintained) + spin 0.9.8 (yanked). Only the
+# alloc-based to_allocvec/from_bytes paths are used here, so heapless is dead weight.
+postcard = { version = "1", default-features = false, features = ["alloc"] }
 rmp-serde = "1"
 serde = { version = "1", features = ["derive"] }
 thiserror = "2"

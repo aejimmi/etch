@@ -29,6 +29,10 @@
 - xxh3 integrity checksums — every WAL entry is hashed; corrupt tails are detected and truncated.
 - Corruption recovery — incomplete WAL entries are truncated at the last valid offset; valid prefix survives.
 - Unreadable snapshot fallback — if the snapshot file is corrupt, it is preserved as `snapshot.backup` and the store rebuilds from WAL.
+- `Store::checkpoint_to` — consistent copy of a live store; writes and compaction are held for the duration, so no acknowledged write is missing from the copy (a plain `cp` races compaction and can lose everything since the last snapshot).
+- `CheckpointReport` — files, bytes, whether a snapshot was forced, and elapsed time; metadata only, safe to log.
+- `WalBackend::inspect` — replay a store directory without writing a byte to it, returning the same `ReplayReport` a real open would, so a checkpoint or backup can be verified before it is needed.
+- Serializable reports — `ReplayReport` and `CheckpointReport` are serde types, so a health check can hand its verdict to a supervisor or log pipeline.
 
 ## Schema Evolution
 
